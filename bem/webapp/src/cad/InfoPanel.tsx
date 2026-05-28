@@ -8,6 +8,20 @@ import type { CadModel } from "@bem/engine";
 import { pointMap } from "./operations.js";
 import type { CanvasAction, SelectionItem } from "./reducer.js";
 
+function countSelectedArcs(
+  model: CadModel,
+  selection: readonly SelectionItem[],
+): number {
+  const lineIds = new Set(
+    selection.filter((s) => s.kind === "line").map((s) => s.id),
+  );
+  let n = 0;
+  for (const l of model.lines) {
+    if (lineIds.has(l.id) && l.arcCentreId !== undefined) n++;
+  }
+  return n;
+}
+
 interface InfoPanelProps {
   readonly model: CadModel;
   readonly selection: readonly SelectionItem[];
@@ -54,7 +68,13 @@ function renderBody(
     }
   }
 
-  return <MultiSummary selection={selection} onDispatch={onDispatch} />;
+  return (
+    <MultiSummary
+      model={model}
+      selection={selection}
+      onDispatch={onDispatch}
+    />
+  );
 }
 
 // ── empty / hint ─────────────────────────────────────────────────────────
@@ -96,14 +116,18 @@ function Empty() {
 // ── multi-selection summary ──────────────────────────────────────────────
 
 function MultiSummary({
+  model,
   selection,
   onDispatch,
 }: {
+  model: CadModel;
   selection: readonly SelectionItem[];
   onDispatch: (a: CanvasAction) => void;
 }) {
   const counts = { point: 0, line: 0, boundary: 0, domain: 0 };
   for (const s of selection) counts[s.kind]++;
+  const arcCount = countSelectedArcs(model, selection);
+
   return (
     <>
       <dl className="cad-info-dl">
@@ -116,17 +140,31 @@ function MultiSummary({
           </ul>
         </Term>
       </dl>
-      {counts.line > 0 && (
+      {(counts.line > 0 || arcCount > 0) && (
         <div className="cad-info-actions">
-          <button
-            type="button"
-            className="cad-info-btn"
-            onClick={() => onDispatch({ type: "flipSelectedLines" })}
-            title="Flip the direction of every selected line (F)"
-          >
-            Flip {counts.line === 1 ? "line" : `${counts.line} lines`}
-            <kbd>F</kbd>
-          </button>
+          {counts.line > 0 && (
+            <button
+              type="button"
+              className="cad-info-btn"
+              onClick={() => onDispatch({ type: "flipSelectedLines" })}
+              title="Flip the direction of every selected line (F)"
+            >
+              Flip {counts.line === 1 ? "line" : `${counts.line} lines`}
+              <kbd>F</kbd>
+            </button>
+          )}
+          {arcCount > 0 && (
+            <button
+              type="button"
+              className="cad-info-btn"
+              onClick={() =>
+                onDispatch({ type: "flipSelectedArcCentres" })
+              }
+              title="Mirror every selected arc's centre across its chord"
+            >
+              Flip {arcCount === 1 ? "arc" : `${arcCount} arcs`}
+            </button>
+          )}
         </div>
       )}
     </>
@@ -201,6 +239,27 @@ function LineInfo({
           Flip direction
           <kbd>F</kbd>
         </button>
+        {!l.arcCentreId ? (
+          <button
+            type="button"
+            className="cad-info-btn"
+            onClick={() =>
+              onDispatch({ type: "convertLineToArc", lineId })
+            }
+            title="Make this a 90° arc; centre point goes on the outward-normal side"
+          >
+            Convert to arc
+          </button>
+        ) : (
+          <button
+            type="button"
+            className="cad-info-btn"
+            onClick={() => onDispatch({ type: "flipArcCentre", lineId })}
+            title="Mirror the arc centre across the chord — the arc bulges to the other side"
+          >
+            Flip arc
+          </button>
+        )}
       </div>
     </>
   );

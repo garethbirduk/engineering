@@ -25,12 +25,23 @@ import {
   useRef,
   useState,
 } from "react";
-import { loopOrientation, type Vec2 } from "@bem/engine";
+import {
+  arcPoint,
+  arcSvgPathD,
+  loopOrientation,
+  type Vec2,
+} from "@bem/engine";
 import { Toolbar } from "./Toolbar.js";
 import { InfoPanel } from "./InfoPanel.js";
 import { gridStepForViewWidth } from "./gridStep.js";
 import { snapWorld } from "./snap.js";
 import { pointMap } from "./operations.js";
+import {
+  downloadAsJsonFile,
+  loadFromJsonFile,
+  loadFromLocalStorage,
+  saveToLocalStorage,
+} from "./persistence.js";
 import {
   INITIAL_STATE,
   canvasReducer,
@@ -314,9 +325,21 @@ export function CadCanvas() {
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent<SVGSVGElement>) => {
-      if (e.button !== 0) return;
       const svg = svgRef.current;
       if (!svg) return;
+
+      // Middle-mouse drag: pan immediately, no other interpretation needed.
+      // Works regardless of modifiers or what's under the cursor.
+      if (e.button === 1) {
+        panStateRef.current = {
+          startClientX: e.clientX,
+          startClientY: e.clientY,
+          startView: view,
+        };
+        e.preventDefault();
+        return;
+      }
+      if (e.button !== 0) return;
 
       const now = performance.now();
       const last = lastDownRef.current;
@@ -460,6 +483,12 @@ export function CadCanvas() {
 
   const onMouseUp = useCallback(
     (e: React.MouseEvent<SVGSVGElement>) => {
+      // Middle-mouse release: end pan and we're done; never a click.
+      if (e.button === 1) {
+        panStateRef.current = null;
+        e.preventDefault();
+        return;
+      }
       const down = downStateRef.current;
       const wasPanning = panStateRef.current !== null;
       downStateRef.current = null;
@@ -551,6 +580,49 @@ export function CadCanvas() {
     svg.addEventListener("wheel", handler, { passive: false });
     return () => svg.removeEventListener("wheel", handler);
   }, [view]);
+
+  // ── persistence (localStorage auto-save / restore) ─────────────────────
+
+  // Restore once at mount. If a stored model exists, load it.
+  useEffect(() => {
+    const stored = loadFromLocalStorage();
+    if (stored) {
+      dispatch({ type: "loadModel", model: stored });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Debounce-save every model change.
+  useEffect(() => {
+    const handle = setTimeout(() => saveToLocalStorage(model), 300);
+    return () => clearTimeout(handle);
+  }, [model]);
+
+  // ── file-action handlers ───────────────────────────────────────────────
+
+  const handleSave = useCallback(() => {
+    downloadAsJsonFile(model);
+  }, [model]);
+
+  const handleLoad = useCallback(async () => {
+    const loaded = await loadFromJsonFile();
+    if (loaded) dispatch({ type: "loadModel", model: loaded });
+  }, []);
+
+  const handleNew = useCallback(() => {
+    const hasContent =
+      model.points.length > 0 ||
+      model.lines.length > 0 ||
+      model.boundaries.length > 0 ||
+      model.domains.length > 0;
+    if (
+      hasContent &&
+      !window.confirm("Discard the current mesh and start fresh?")
+    ) {
+      return;
+    }
+    dispatch({ type: "newModel" });
+  }, [model]);
 
   // ── aspect ratio ───────────────────────────────────────────────────────
 
@@ -655,6 +727,9 @@ export function CadCanvas() {
         selectionSummary={selectionSummary}
         onCreateDomain={() => dispatch({ type: "createDomainFromSelection" })}
         onDelete={() => dispatch({ type: "deleteSelection" })}
+        onSave={handleSave}
+        onLoad={handleLoad}
+        onNew={handleNew}
       />
       <div className="cad-main">
         <div className="cad-canvas-host">
@@ -682,7 +757,7 @@ export function CadCanvas() {
                 />
               ))}
 
-              {/* Lines + outward-normal ticks. */}
+              {/* Lines (straight or arc) + outward-normal ticks. */}
               <g pointerEvents="none">
                 {model.lines.map((l) => {
                   const start = pointsById.get(l.startId);
@@ -695,32 +770,81 @@ export function CadCanvas() {
                     : inBoundary
                       ? "var(--boundary)"
                       : "currentColor";
+                  const strokeW = isSelected ? lineStroke * 1.8 : lineStroke;
 
-                  const dx = end.x - start.x;
-                  const dy = end.y - start.y;
-                  const len = Math.hypot(dx, dy);
-                  const mx = (start.x + end.x) / 2;
-                  const my = (start.y + end.y) / 2;
-                  const showTick = len > normalTickLen * 1.2;
-                  const tickEnd = showTick
-                    ? {
-                        x: mx + (dy / len) * normalTickLen,
-                        y: my + (-dx / len) * normalTickLen,
-                      }
-                    : null;
+                  // Arc render path. Falls back to straight if the centre
+                  // Point has been deleted out from under it.
+                  const centre = l.arcCentreId
+                    ? pointsById.get(l.arcCentreId)
+                    : undefined;
+                  const isArc = centre !== undefined;
+
+                  // Midpoint for the normal tick + the tangent direction
+                  // at that midpoint (so the tick is perpendicular).
+                  let mx: number, my: number;
+                  let tickDx: number, tickDy: number; // line direction at mid
+                  if (isArc) {
+                    const mid = arcPoint(start, end, centre, 0.5);
+                    mx = mid.x;
+                    my = mid.y;
+                    // Tangent at midpoint = perpendicular to radius, in the
+                    // direction of arc travel start→end.
+                    const rx = mid.x - centre.x;
+                    const ry = mid.y - centre.y;
+                    const rl = Math.hypot(rx, ry);
+                    // Two tangent candidates: (-ry, rx) and (ry, -rx). Pick
+                    // the one whose dot product with (end - start) is +ve.
+                    const cdx = end.x - start.x;
+                    const cdy = end.y - start.y;
+                    const t1x = -ry / rl;
+                    const t1y = rx / rl;
+                    if (t1x * cdx + t1y * cdy >= 0) {
+                      tickDx = t1x;
+                      tickDy = t1y;
+                    } else {
+                      tickDx = -t1x;
+                      tickDy = -t1y;
+                    }
+                  } else {
+                    mx = (start.x + end.x) / 2;
+                    my = (start.y + end.y) / 2;
+                    const cdx = end.x - start.x;
+                    const cdy = end.y - start.y;
+                    const cl = Math.hypot(cdx, cdy);
+                    tickDx = cl > 0 ? cdx / cl : 1;
+                    tickDy = cl > 0 ? cdy / cl : 0;
+                  }
+                  // Outward normal = right-of-direction = (dy, -dx).
+                  const tickEnd = {
+                    x: mx + tickDy * normalTickLen,
+                    y: my - tickDx * normalTickLen,
+                  };
+                  // Hide tick on very short geometry to avoid clutter.
+                  const chordLen = Math.hypot(end.x - start.x, end.y - start.y);
+                  const showTick = chordLen > normalTickLen * 1.2;
 
                   return (
                     <g key={l.id}>
-                      <line
-                        x1={start.x}
-                        y1={start.y}
-                        x2={end.x}
-                        y2={end.y}
-                        stroke={stroke}
-                        strokeWidth={isSelected ? lineStroke * 1.8 : lineStroke}
-                        strokeLinecap="round"
-                      />
-                      {tickEnd && (
+                      {isArc ? (
+                        <path
+                          d={arcSvgPathD(start, end, centre)}
+                          fill="none"
+                          stroke={stroke}
+                          strokeWidth={strokeW}
+                          strokeLinecap="round"
+                        />
+                      ) : (
+                        <line
+                          x1={start.x}
+                          y1={start.y}
+                          x2={end.x}
+                          y2={end.y}
+                          stroke={stroke}
+                          strokeWidth={strokeW}
+                          strokeLinecap="round"
+                        />
+                      )}
+                      {showTick && (
                         <line
                           x1={mx}
                           y1={my}

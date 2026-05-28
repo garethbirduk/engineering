@@ -18,8 +18,11 @@
 // Keyboard: Delete/Backspace = Delete; Escape = clear selection + cancel drafts.
 
 import {
+  arcCentreFor90Degrees,
+  cursorOnArc,
   findAllClosedLoops,
   findClosedLoop,
+  mirrorAcrossChord,
   projectOntoSegment,
   type Boundary,
   type CadModel,
@@ -102,6 +105,11 @@ export type CanvasAction =
   | { readonly type: "createDomainFromSelection" }
   | { readonly type: "deleteSelection" }
   | { readonly type: "flipSelectedLines" }
+  | { readonly type: "convertLineToArc"; readonly lineId: Id }
+  | { readonly type: "flipArcCentre"; readonly lineId: Id }
+  | { readonly type: "flipSelectedArcCentres" }
+  | { readonly type: "loadModel"; readonly model: CadModel }
+  | { readonly type: "newModel" }
   | {
       readonly type: "selectInMarquee";
       readonly minX: number;
@@ -162,6 +170,21 @@ export function canvasReducer(
     case "flipSelectedLines":
       return flipSelectedLines(state);
 
+    case "convertLineToArc":
+      return convertLineToArc(state, action.lineId);
+
+    case "flipArcCentre":
+      return flipArcCentre(state, action.lineId);
+
+    case "flipSelectedArcCentres":
+      return flipSelectedArcCentres(state);
+
+    case "loadModel":
+      return { ...INITIAL_STATE, model: action.model };
+
+    case "newModel":
+      return INITIAL_STATE;
+
     case "selectInMarquee":
       return applyMarqueeSelect(
         state,
@@ -216,12 +239,19 @@ function computeHit(model: CadModel, ctx: ClickContext): HitResult {
     return { entity: { kind: "point", id: snap.existingPointId }, snap };
   }
   for (const l of model.lines) {
-    if (l.arcCentreId !== undefined) continue;
     const a = model.points.find((p) => p.id === l.startId);
     const b = model.points.find((p) => p.id === l.endId);
     if (!a || !b) continue;
-    if (cursorOnSegment(ctx.cursor, a, b, ctx.lineTolerance)) {
-      return { entity: { kind: "line", id: l.id }, snap };
+    if (l.arcCentreId !== undefined) {
+      const c = model.points.find((p) => p.id === l.arcCentreId);
+      if (!c) continue;
+      if (cursorOnArc(ctx.cursor, a, b, c, ctx.lineTolerance)) {
+        return { entity: { kind: "line", id: l.id }, snap };
+      }
+    } else {
+      if (cursorOnSegment(ctx.cursor, a, b, ctx.lineTolerance)) {
+        return { entity: { kind: "line", id: l.id }, snap };
+      }
     }
   }
   return { entity: null, snap };
@@ -812,6 +842,94 @@ export function cursorOnSegment(
   return ex * ex + ey * ey <= tolerance * tolerance;
 }
 
+/**
+ * Promote a straight Line to an arc by creating a new Point at the 90°
+ * centre position and setting `line.arcCentreId` to point at it. No-op if
+ * the line is already an arc.
+ */
+function convertLineToArc(state: CanvasState, lineId: Id): CanvasState {
+  const line = state.model.lines.find((l) => l.id === lineId);
+  if (!line || line.arcCentreId !== undefined) return state;
+  const start = state.model.points.find((p) => p.id === line.startId);
+  const end = state.model.points.find((p) => p.id === line.endId);
+  if (!start || !end) return state;
+
+  const c = arcCentreFor90Degrees(start, end);
+  const centre: Point = { id: newId(), x: c.x, y: c.y };
+  return {
+    ...state,
+    model: {
+      ...state.model,
+      points: [...state.model.points, centre],
+      lines: state.model.lines.map((l) =>
+        l.id === lineId ? { ...l, arcCentreId: centre.id } : l,
+      ),
+    },
+  };
+}
+
+/**
+ * Mirror an arc's centre Point across the chord (start↔end). The arc now
+ * bulges to the opposite side. The Point's id is preserved (other arcs or
+ * references stay valid).
+ */
+/**
+ * Flip every arc-centre point for every selected arc. Each centre is
+ * mirrored across its own chord, so each arc bulges to the other side.
+ * Atomic: one render for all of them.
+ */
+function flipSelectedArcCentres(state: CanvasState): CanvasState {
+  const lineIds = new Set(
+    state.selection.filter((s) => s.kind === "line").map((s) => s.id),
+  );
+  if (lineIds.size === 0) return state;
+
+  // Collect updates: centre point id → new position. A centre shared by
+  // multiple arcs gets flipped once relative to the first arc's chord (rare;
+  // by default each arc has its own centre, so this is just bookkeeping).
+  const centreMoves = new Map<Id, Vec2>();
+  for (const l of state.model.lines) {
+    if (!lineIds.has(l.id) || l.arcCentreId === undefined) continue;
+    const start = state.model.points.find((p) => p.id === l.startId);
+    const end = state.model.points.find((p) => p.id === l.endId);
+    const centre = state.model.points.find((p) => p.id === l.arcCentreId);
+    if (!start || !end || !centre) continue;
+    if (centreMoves.has(centre.id)) continue;
+    centreMoves.set(centre.id, mirrorAcrossChord(centre, start, end));
+  }
+  if (centreMoves.size === 0) return state;
+
+  return {
+    ...state,
+    model: {
+      ...state.model,
+      points: state.model.points.map((p) => {
+        const m = centreMoves.get(p.id);
+        return m ? { ...p, x: m.x, y: m.y } : p;
+      }),
+    },
+  };
+}
+
+function flipArcCentre(state: CanvasState, lineId: Id): CanvasState {
+  const line = state.model.lines.find((l) => l.id === lineId);
+  if (!line || line.arcCentreId === undefined) return state;
+  const start = state.model.points.find((p) => p.id === line.startId);
+  const end = state.model.points.find((p) => p.id === line.endId);
+  const centre = state.model.points.find((p) => p.id === line.arcCentreId);
+  if (!start || !end || !centre) return state;
+  const mirrored = mirrorAcrossChord(centre, start, end);
+  return {
+    ...state,
+    model: {
+      ...state.model,
+      points: state.model.points.map((p) =>
+        p.id === centre.id ? { ...p, x: mirrored.x, y: mirrored.y } : p,
+      ),
+    },
+  };
+}
+
 function snapToGrid(p: Vec2, gridStep: number): Vec2 {
   return {
     x: Math.round(p.x / gridStep) * gridStep,
@@ -838,6 +956,18 @@ export function selectionFormsClosedLoop(state: CanvasState): boolean {
 /** How many boundaries are currently selected (for Create Domain). */
 export function countSelectedBoundaries(state: CanvasState): number {
   return state.selection.filter((s) => s.kind === "boundary").length;
+}
+
+/** How many selected lines are arcs (have arcCentreId set). */
+export function countSelectedArcs(state: CanvasState): number {
+  const lineIds = new Set(
+    state.selection.filter((s) => s.kind === "line").map((s) => s.id),
+  );
+  let n = 0;
+  for (const l of state.model.lines) {
+    if (lineIds.has(l.id) && l.arcCentreId !== undefined) n++;
+  }
+  return n;
 }
 
 /**

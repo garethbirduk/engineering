@@ -1,8 +1,8 @@
 // Context-aware action bar.
 //
-// Buttons appear only when their action is applicable. Boundaries are
-// created as a by-product of creating a domain — there's no standalone
-// "Create boundary" button.
+// Left group  — selection-driven create/delete actions.
+// Right group — always-visible file actions (New / Save / Load).
+// Between    — selection summary.
 
 interface ToolbarProps {
   readonly canCreateDomain: boolean;
@@ -10,6 +10,9 @@ interface ToolbarProps {
   readonly selectionSummary: string;
   readonly onCreateDomain: () => void;
   readonly onDelete: () => void;
+  readonly onSave: () => void;
+  readonly onLoad: () => void;
+  readonly onNew: () => void;
 }
 
 export function Toolbar({
@@ -18,6 +21,9 @@ export function Toolbar({
   selectionSummary,
   onCreateDomain,
   onDelete,
+  onSave,
+  onLoad,
+  onNew,
 }: ToolbarProps) {
   return (
     <div className="cad-toolbar" role="toolbar" aria-label="CAD actions">
@@ -46,6 +52,33 @@ export function Toolbar({
       <div className="cad-toolbar-spacer" />
       <div className="cad-toolbar-status" aria-live="polite">
         {selectionSummary}
+      </div>
+      <div className="cad-toolgroup-sep" aria-hidden="true" />
+      <div className="cad-toolgroup" aria-label="File">
+        <button
+          type="button"
+          className="cad-tool"
+          onClick={onNew}
+          title="Clear the mesh and start fresh"
+        >
+          New
+        </button>
+        <button
+          type="button"
+          className="cad-tool"
+          onClick={onSave}
+          title="Download the mesh as a JSON file"
+        >
+          Save
+        </button>
+        <button
+          type="button"
+          className="cad-tool"
+          onClick={onLoad}
+          title="Load a mesh from a JSON file (replaces current)"
+        >
+          Load
+        </button>
       </div>
     </div>
   );
