@@ -32,10 +32,18 @@ interface VertexNeighbour {
   readonly otherVertex: Id;
 }
 
-export function findClosedLoop(
+/**
+ * Decompose `selectedLineIds` into one or more disjoint closed loops, in
+ * traversal order. Returns null if any vertex's degree (within the selection)
+ * isn't exactly 2, OR if a connected component doesn't actually close.
+ *
+ * Use this for "select exterior + hole + commit" workflows where multiple
+ * boundaries need to be inferred from one selection.
+ */
+export function findAllClosedLoops(
   selectedLineIds: readonly Id[],
   model: Pick<CadModel, "lines">,
-): readonly BoundarySegment[] | null {
+): readonly (readonly BoundarySegment[])[] | null {
   if (selectedLineIds.length === 0) return null;
 
   const lineById = new Map<Id, Line>(model.lines.map((l) => [l.id, l]));
@@ -46,46 +54,61 @@ export function findClosedLoop(
     lines.push(l);
   }
 
-  // Vertex adjacency, restricted to the selection.
   const adj = new Map<Id, VertexNeighbour[]>();
   for (const l of lines) {
     pushAdj(adj, l.startId, { lineId: l.id, otherVertex: l.endId });
     pushAdj(adj, l.endId, { lineId: l.id, otherVertex: l.startId });
   }
-
-  // Every vertex must have degree exactly 2.
   for (const neighbours of adj.values()) {
     if (neighbours.length !== 2) return null;
   }
 
-  // Traverse.
-  const first = lines[0];
-  if (!first) return null;
-  const segments: BoundarySegment[] = [
-    { lineId: first.id, direction: 1 },
-  ];
-  const visited = new Set<Id>([first.id]);
-  const startVertex = first.startId;
-  let currentVertex = first.endId;
+  const visited = new Set<Id>();
+  const loops: BoundarySegment[][] = [];
 
-  while (segments.length < lines.length) {
-    const neighbours = adj.get(currentVertex);
-    if (!neighbours) return null;
-    const next = neighbours.find((n) => !visited.has(n.lineId));
-    if (!next) return null;
-    const nextLine = lineById.get(next.lineId);
-    if (!nextLine) return null;
-    const direction: 1 | -1 =
-      nextLine.startId === currentVertex ? 1 : -1;
-    segments.push({ lineId: next.lineId, direction });
-    visited.add(next.lineId);
-    currentVertex = next.otherVertex;
+  for (const startLine of lines) {
+    if (visited.has(startLine.id)) continue;
+    const segments: BoundarySegment[] = [
+      { lineId: startLine.id, direction: 1 },
+    ];
+    visited.add(startLine.id);
+    const startVertex = startLine.startId;
+    let currentVertex = startLine.endId;
+
+    while (true) {
+      const neighbours = adj.get(currentVertex);
+      if (!neighbours) return null;
+      const next = neighbours.find((n) => !visited.has(n.lineId));
+      if (!next) {
+        // Closed back to the loop's start?
+        if (currentVertex !== startVertex) return null;
+        break;
+      }
+      const nextLine = lineById.get(next.lineId);
+      if (!nextLine) return null;
+      const direction: 1 | -1 =
+        nextLine.startId === currentVertex ? 1 : -1;
+      segments.push({ lineId: next.lineId, direction });
+      visited.add(next.lineId);
+      currentVertex = next.otherVertex;
+    }
+    loops.push(segments);
   }
 
-  // The walk must close back to the starting vertex.
-  if (currentVertex !== startVertex) return null;
+  return loops.length > 0 ? loops : null;
+}
 
-  return segments;
+/**
+ * Decompose into exactly one closed loop; null if the selection has any
+ * other topology (open path, multiple loops, branching).
+ */
+export function findClosedLoop(
+  selectedLineIds: readonly Id[],
+  model: Pick<CadModel, "lines">,
+): readonly BoundarySegment[] | null {
+  const all = findAllClosedLoops(selectedLineIds, model);
+  if (!all || all.length !== 1) return null;
+  return all[0] ?? null;
 }
 
 function pushAdj(

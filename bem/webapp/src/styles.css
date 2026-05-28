@@ -112,11 +112,23 @@ body,
 
 .cad-toolbar {
   display: flex;
+  align-items: center;
   gap: 0.6rem;
   padding: 0.4rem 0.6rem;
   border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent);
   background: color-mix(in srgb, canvas 92%, currentColor 8%);
   flex-wrap: wrap;
+  min-height: 2rem;
+}
+
+.cad-toolbar-spacer {
+  flex: 1 1 auto;
+}
+
+.cad-toolbar-status {
+  font-size: 0.8rem;
+  opacity: 0.7;
+  white-space: nowrap;
 }
 
 .cad-toolgroup {

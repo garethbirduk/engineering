@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { findClosedLoop } from "./closedLoop.js";
+import { findAllClosedLoops, findClosedLoop } from "./closedLoop.js";
 import type { CadModel, Line, LineBcs } from "./types.js";
 
 const BCS: LineBcs = {
@@ -139,5 +139,49 @@ describe("findClosedLoop", () => {
       L("l4", "d", "a"),
     ]);
     expect(findClosedLoop(["l1", "l2", "l3"], m)).toBeNull();
+  });
+});
+
+describe("findAllClosedLoops", () => {
+  it("two disjoint triangles → two loops", () => {
+    const m = model([
+      L("l1", "a", "b"), L("l2", "b", "c"), L("l3", "c", "a"),
+      L("l4", "x", "y"), L("l5", "y", "z"), L("l6", "z", "x"),
+    ]);
+    const loops = findAllClosedLoops(
+      ["l1", "l2", "l3", "l4", "l5", "l6"],
+      m,
+    );
+    expect(loops).not.toBeNull();
+    expect(loops!).toHaveLength(2);
+    expect(loops![0]!).toHaveLength(3);
+    expect(loops![1]!).toHaveLength(3);
+  });
+
+  it("single triangle → one loop", () => {
+    const m = model([
+      L("l1", "a", "b"), L("l2", "b", "c"), L("l3", "c", "a"),
+    ]);
+    const loops = findAllClosedLoops(["l1", "l2", "l3"], m);
+    expect(loops).not.toBeNull();
+    expect(loops!).toHaveLength(1);
+  });
+
+  it("figure-8 (shared vertex degree 4) → null", () => {
+    const m = model([
+      L("l1", "s", "b"), L("l2", "b", "c"), L("l3", "c", "s"),
+      L("l4", "s", "y"), L("l5", "y", "z"), L("l6", "z", "s"),
+    ]);
+    expect(
+      findAllClosedLoops(["l1", "l2", "l3", "l4", "l5", "l6"], m),
+    ).toBeNull();
+  });
+
+  it("open path mixed with closed loop → null", () => {
+    const m = model([
+      L("l1", "a", "b"), L("l2", "b", "c"), L("l3", "c", "a"),
+      L("l4", "x", "y"),
+    ]);
+    expect(findAllClosedLoops(["l1", "l2", "l3", "l4"], m)).toBeNull();
   });
 });

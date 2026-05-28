@@ -1,19 +1,21 @@
-// SVG canvas for the CAD editor.
+// SVG canvas for the gesture-based CAD editor.
 //
-// Interaction model:
-//   itemMode ∈ { point, line, boundary, domain }
-//   action   ∈ { select, delete, create }
-// A click is dispatched to the reducer with a HitResult (entity under cursor +
-// snap result), and the reducer's (itemMode × action) matrix decides what
-// happens.
+// Universal gestures (no modes):
+//   double-click empty            → add Point
+//   double-click Point + drag     → draw new Line from that Point
+//   double-click Line + drag      → split + drag new Point
+//   drag Point                    → move Point
+//   drag Line                     → translate Line
+//   click entity                  → select (replace)
+//   ctrl+click Line/Point         → toggle in multi-selection
+//   click empty space             → clear selection
+//   shift+drag                    → pan
+//   wheel                         → zoom
+//   Del / Backspace               → delete selection
+//   Esc                           → clear selection + drafts
 //
 // Coordinate model:
-// - All inputs/outputs (Point.x, Point.y, ...) are WORLD coords with y up.
-// - SVG natively has y down. We render inside <g transform="scale(1, -1)"> so
-//   children specify positions in world coords directly.
-// - viewBox holds world coords; we flip its y-extent so panning feels natural.
-//
-// Pan: shift + left-drag. Zoom: wheel.
+// - World coords with y up. SVG renders inside <g transform="scale(1,-1)">.
 
 import {
   useCallback,
@@ -23,7 +25,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { findClosedLoop, type Vec2 } from "@bem/engine";
+import { loopOrientation, type Vec2 } from "@bem/engine";
 import { Toolbar } from "./Toolbar.js";
 import { InfoPanel } from "./InfoPanel.js";
 import { gridStepForViewWidth } from "./gridStep.js";
@@ -32,8 +34,10 @@ import { pointMap } from "./operations.js";
 import {
   INITIAL_STATE,
   canvasReducer,
-  type Action,
-  type ItemMode,
+  hitTest,
+  selectionCanCreateDomain,
+  type CanvasState,
+  type ClickContext,
 } from "./reducer.js";
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -52,6 +56,8 @@ const MIN_WIDTH = 1e-3;
 const MAX_WIDTH = 1e6;
 const ZOOM_PER_WHEEL_TICK = 1.15;
 const CLICK_DRAG_PX_THRESHOLD = 3;
+const DOUBLE_CLICK_WINDOW_MS = 400;
+const DOUBLE_CLICK_RADIUS_PX = 5;
 
 function viewBoxAttr(v: ViewBox): string {
   const x = v.cx - v.width / 2;
@@ -87,12 +93,10 @@ function Grid({ view, step }: { view: ViewBox; step: number }) {
   const endX = Math.floor(maxX / step) * step;
   const startY = Math.ceil(minY / step) * step;
   const endY = Math.floor(maxY / step) * step;
-
   const verticals: number[] = [];
   for (let x = startX; x <= endX + step / 2; x += step) verticals.push(x);
   const horizontals: number[] = [];
   for (let y = startY; y <= endY + step / 2; y += step) horizontals.push(y);
-
   const thin = view.width * 0.0005;
   const thick = view.width * 0.0012;
   return (
@@ -132,28 +136,41 @@ function Grid({ view, step }: { view: ViewBox; step: number }) {
 export function CadCanvas() {
   const svgRef = useRef<SVGSVGElement>(null);
   const [view, setView] = useState<ViewBox>(INITIAL_VIEW);
-  const [
-    {
-      model,
-      itemMode,
-      action,
-      selection,
-      lineDraft,
-      boundaryDraft,
-      domainDraft,
-      dragSession,
-    },
-    dispatch,
-  ] = useReducer(canvasReducer, INITIAL_STATE);
+  const [state, dispatch] = useReducer(canvasReducer, INITIAL_STATE);
   const [cursorWorld, setCursorWorld] = useState<Vec2 | null>(null);
   const [snap, setSnap] = useState<ReturnType<typeof snapWorld> | null>(null);
 
+  const { model, selection, dragSession, newLineDraft } = state;
+
+  // Reducer is pure but startDragForHit composes selection + dragSession;
+  // we keep a ref to the latest state for use inside refs/handlers that
+  // can't read React state synchronously.
+  const stateRef = useRef<CanvasState>(state);
+  stateRef.current = state;
+
+  // Pan + click-vs-drag detection.
   const panStateRef = useRef<
     | { startClientX: number; startClientY: number; startView: ViewBox }
     | null
   >(null);
   const downStateRef = useRef<
-    | { clientX: number; clientY: number; moved: boolean }
+    | {
+        clientX: number;
+        clientY: number;
+        moved: boolean;
+        wasDoubleClick: boolean;
+        shift: boolean;
+        hitKind: "point" | "line" | null;
+      }
+    | null
+  >(null);
+  // Marquee selection: starts on drag-from-empty (no shift). World coords.
+  const [marquee, setMarquee] = useState<
+    { start: Vec2; current: Vec2; additive: boolean } | null
+  >(null);
+  // Double-click detection — track last mousedown position + time.
+  const lastDownRef = useRef<
+    | { time: number; clientX: number; clientY: number }
     | null
   >(null);
 
@@ -162,50 +179,185 @@ export function CadCanvas() {
   const lineTolerance = gridStep * 0.15;
   const pointsById = useMemo(() => pointMap(model.points), [model.points]);
 
-  // ── pan ────────────────────────────────────────────────────────────────
+  const makeCtx = useCallback(
+    (cursor: Vec2): ClickContext => ({
+      cursor,
+      gridStep,
+      snapRadius,
+      lineTolerance,
+    }),
+    [gridStep, snapRadius, lineTolerance],
+  );
+
+  // ── derived: lines in committed boundaries (red); domain fill data ─────
+
+  const linesInBoundary = useMemo(() => {
+    const ids = new Set<string>();
+    for (const b of model.boundaries) {
+      for (const seg of b.segments) ids.add(seg.lineId);
+    }
+    return ids;
+  }, [model.boundaries]);
+
+  // One SVG <path> per domain so holes don't bleed across domains. A
+  // bounded domain (any CCW boundary) combines every member boundary into
+  // one path with fill-rule="evenodd" — inner subpaths punch holes
+  // automatically (genuine SVG hole, not a layered overlay). An unbounded
+  // domain (only CW boundaries) renders bands of width L/2 on the material
+  // side of every constituent line.
+  const domainPaths = useMemo(() => {
+    const linesById = new Map(model.lines.map((l) => [l.id, l]));
+    const boundariesById = new Map(model.boundaries.map((b) => [b.id, b]));
+    const paths: { kind: "bounded" | "unbounded"; d: string }[] = [];
+
+    const subpathFor = (segs: typeof model.boundaries[number]["segments"]) => {
+      let sub = "";
+      for (let i = 0; i < segs.length; i++) {
+        const seg = segs[i]!;
+        const line = linesById.get(seg.lineId);
+        if (!line) return null;
+        const startId = seg.direction === 1 ? line.startId : line.endId;
+        const p = pointsById.get(startId);
+        if (!p) return null;
+        sub += `${i === 0 ? "M" : "L"} ${p.x} ${p.y} `;
+      }
+      return sub + "Z";
+    };
+
+    const bandFor = (segs: typeof model.boundaries[number]["segments"]) => {
+      const bands: string[] = [];
+      for (const seg of segs) {
+        const line = linesById.get(seg.lineId);
+        if (!line) continue;
+        const startId = seg.direction === 1 ? line.startId : line.endId;
+        const endId = seg.direction === 1 ? line.endId : line.startId;
+        const a = pointsById.get(startId);
+        const b = pointsById.get(endId);
+        if (!a || !b) continue;
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const len = Math.hypot(dx, dy);
+        if (len === 0) continue;
+        // Outward normal (right-of-direction) is (dy, -dx)/len; the material
+        // side is the opposite: (-dy, dx)/len.
+        const nx = -dy / len;
+        const ny = dx / len;
+        const w = len / 2;
+        const ox = nx * w;
+        const oy = ny * w;
+        bands.push(
+          `M ${a.x} ${a.y} L ${b.x} ${b.y} L ${b.x + ox} ${b.y + oy} L ${a.x + ox} ${a.y + oy} Z`,
+        );
+      }
+      return bands.join(" ");
+    };
+
+    for (const domain of model.domains) {
+      const members = domain.boundaryIds
+        .map((id) => boundariesById.get(id))
+        .filter(
+          (b): b is NonNullable<typeof b> => !!b && b.segments.length >= 3,
+        );
+      if (members.length === 0) continue;
+
+      const orientations = members.map((b) =>
+        loopOrientation(b.segments, model),
+      );
+      const isBounded = orientations.includes("ccw");
+
+      if (isBounded) {
+        // Bounded: combine every member boundary as a subpath. Even-odd
+        // automatically makes inner subpaths into holes regardless of
+        // their orientation.
+        const subs: string[] = [];
+        for (const b of members) {
+          const sub = subpathFor(b.segments);
+          if (sub) subs.push(sub);
+        }
+        if (subs.length > 0) {
+          paths.push({ kind: "bounded", d: subs.join(" ") });
+        }
+      } else {
+        // Unbounded: bands for every member boundary's lines.
+        const bandSubs: string[] = [];
+        for (const b of members) {
+          const bands = bandFor(b.segments);
+          if (bands) bandSubs.push(bands);
+        }
+        if (bandSubs.length > 0) {
+          paths.push({ kind: "unbounded", d: bandSubs.join(" ") });
+        }
+      }
+    }
+    return paths;
+  }, [model.domains, model.boundaries, model.lines, model, pointsById]);
+
+  // ── selection lookup sets for fast styling ─────────────────────────────
+
+  const selectedPointIds = useMemo(
+    () => new Set(selection.filter((s) => s.kind === "point").map((s) => s.id)),
+    [selection],
+  );
+  const selectedLineIds = useMemo(
+    () => new Set(selection.filter((s) => s.kind === "line").map((s) => s.id)),
+    [selection],
+  );
+
+  // ── derived button-enable flags ────────────────────────────────────────
+
+  const canCreateDomain = useMemo(
+    () => selectionCanCreateDomain(state),
+    [state],
+  );
+
+  // ── pointer events ─────────────────────────────────────────────────────
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent<SVGSVGElement>) => {
       if (e.button !== 0) return;
+      const svg = svgRef.current;
+      if (!svg) return;
+
+      const now = performance.now();
+      const last = lastDownRef.current;
+      const isDoubleClick =
+        last !== null &&
+        now - last.time < DOUBLE_CLICK_WINDOW_MS &&
+        Math.hypot(e.clientX - last.clientX, e.clientY - last.clientY) <
+          DOUBLE_CLICK_RADIUS_PX;
+
+      const downCursor = clientToWorld(svg, view, e.clientX, e.clientY);
+      const hit = hitTest(stateRef.current.model, makeCtx(downCursor));
       downStateRef.current = {
         clientX: e.clientX,
         clientY: e.clientY,
         moved: false,
+        wasDoubleClick: isDoubleClick,
+        shift: e.shiftKey,
+        hitKind: hit.entity?.kind ?? null,
       };
-      if (e.shiftKey) {
-        panStateRef.current = {
-          startClientX: e.clientX,
-          startClientY: e.clientY,
-          startView: view,
-        };
+
+      if (isDoubleClick) {
+        lastDownRef.current = null;
+        const cursor = clientToWorld(svg, view, e.clientX, e.clientY);
+        dispatch({ type: "doubleClick", ctx: makeCtx(cursor) });
         e.preventDefault();
         return;
       }
-      if (e.ctrlKey || e.metaKey) {
-        const svg = svgRef.current;
-        if (!svg) return;
-        const cursor = clientToWorld(svg, view, e.clientX, e.clientY);
-        dispatch({ type: "ctrlClick", cursor, lineTolerance, gridStep });
-        e.preventDefault();
-        return;
-      }
-      if (action === "select") {
-        const svg = svgRef.current;
-        if (!svg) return;
-        const cursor = clientToWorld(svg, view, e.clientX, e.clientY);
-        dispatch({
-          type: "startSelectDrag",
-          cursor,
-          gridStep,
-          snapRadius,
-          lineTolerance,
-        });
-      }
+
+      lastDownRef.current = {
+        time: now,
+        clientX: e.clientX,
+        clientY: e.clientY,
+      };
+      // Drag setup is lazy: a shift+drag becomes a pan, anything else becomes
+      // a startDrag for the entity under the original mousedown.
+      // A shift+click without drag becomes a toggle-in-selection (multi-select).
     },
-    [view, action, gridStep, snapRadius, lineTolerance],
+    [view, makeCtx],
   );
 
-  // ── mouse-move: cursor, snap preview, pan, drag detection ──────────────
+  // ── mouse move: pan, dragging, snap/cursor preview ─────────────────────
 
   const onMouseMove = useCallback(
     (e: React.MouseEvent<SVGSVGElement>) => {
@@ -214,21 +366,14 @@ export function CadCanvas() {
 
       const world = clientToWorld(svg, view, e.clientX, e.clientY);
       setCursorWorld(world);
-
-      // Drag (point, line, or split-and-drag) takes priority over everything.
-      if (dragSession !== null) {
-        const snappedToGrid: Vec2 = {
-          x: Math.round(world.x / gridStep) * gridStep,
-          y: Math.round(world.y / gridStep) * gridStep,
-        };
-        dispatch({ type: "dragTo", cursor: snappedToGrid });
-        return;
-      }
-
-      // Snap preview is relevant for any action other than maybe boundary mode
-      // where we'll later highlight whole lines; for now always show.
       setSnap(snapWorld(world, model.points, gridStep, snapRadius));
 
+      // Click→drag transition: when movement crosses the threshold for the
+      // first time, decide which gesture this is:
+      //   - mousedown was on a Point/Line (no shift) → drag the entity
+      //   - mousedown was on empty + shift                → pan
+      //   - mousedown was on empty + no shift             → marquee select
+      //   - mousedown was on entity + shift               → pan (shift wins)
       const down = downStateRef.current;
       if (down && !down.moved) {
         const dx = e.clientX - down.clientX;
@@ -238,9 +383,63 @@ export function CadCanvas() {
           CLICK_DRAG_PX_THRESHOLD * CLICK_DRAG_PX_THRESHOLD
         ) {
           down.moved = true;
+          if (
+            !panStateRef.current &&
+            !down.wasDoubleClick &&
+            stateRef.current.dragSession === null &&
+            stateRef.current.newLineDraft === null &&
+            marquee === null
+          ) {
+            const startWorld = clientToWorld(
+              svg,
+              view,
+              down.clientX,
+              down.clientY,
+            );
+            if (down.shift) {
+              // Shift + drag (anywhere) → pan. Keeps pan accessible over
+              // both empty space and entities. Additive marquee is reachable
+              // via plain drag, then shift-click extras after.
+              panStateRef.current = {
+                startClientX: down.clientX,
+                startClientY: down.clientY,
+                startView: view,
+              };
+            } else if (down.hitKind !== null) {
+              // Drag on entity → move it.
+              dispatch({
+                type: "startDrag",
+                ctx: makeCtx(startWorld),
+                toggle: false,
+              });
+            } else {
+              // Drag on empty (no shift) → marquee select (replace).
+              setMarquee({ start: startWorld, current: world, additive: false });
+            }
+          }
         }
       }
 
+      // Live-update the marquee rect.
+      if (marquee !== null) {
+        setMarquee((m) => (m ? { ...m, current: world } : m));
+      }
+
+      // If a drag is active (existing dragSession OR just dispatched above),
+      // apply the move. We re-read via stateRef in case the dispatch above
+      // hasn't reflected in our captured `dragSession` yet (it won't —
+      // closure captures the value at render time).
+      const liveSession = stateRef.current.dragSession;
+      if (liveSession) {
+        const snappedToGrid: Vec2 = {
+          x: Math.round(world.x / gridStep) * gridStep,
+          y: Math.round(world.y / gridStep) * gridStep,
+        };
+        dispatch({ type: "dragTo", cursor: snappedToGrid });
+        return;
+      }
+
+      // Pan in progress.
       const pan = panStateRef.current;
       if (!pan) return;
       const rect = svg.getBoundingClientRect();
@@ -254,39 +453,62 @@ export function CadCanvas() {
         cy: pan.startView.cy + dyWorld,
       });
     },
-    [view, model.points, gridStep, snapRadius, dragSession],
+    [view, model.points, gridStep, snapRadius, makeCtx, marquee],
   );
 
-  // ── mouse-up: dispatch click to reducer ────────────────────────────────
+  // ── mouse up ───────────────────────────────────────────────────────────
 
   const onMouseUp = useCallback(
     (e: React.MouseEvent<SVGSVGElement>) => {
       const down = downStateRef.current;
-      const wasDragging = panStateRef.current !== null;
+      const wasPanning = panStateRef.current !== null;
       downStateRef.current = null;
       panStateRef.current = null;
 
-      // End any active drag. Don't fire a normal click — selection
-      // was already set when the drag started.
-      if (dragSession !== null) {
-        dispatch({ type: "endDrag" });
+      const svg = svgRef.current;
+      if (!svg) return;
+      const cursor = clientToWorld(svg, view, e.clientX, e.clientY);
+
+      // Always end any active drag / commit any new-line draft on mouseup.
+      if (stateRef.current.dragSession || stateRef.current.newLineDraft) {
+        dispatch({ type: "endDrag", cursor, ctx: makeCtx(cursor) });
+        return;
+      }
+
+      // Commit a marquee selection if active.
+      if (marquee !== null) {
+        const minX = Math.min(marquee.start.x, marquee.current.x);
+        const maxX = Math.max(marquee.start.x, marquee.current.x);
+        const minY = Math.min(marquee.start.y, marquee.current.y);
+        const maxY = Math.max(marquee.start.y, marquee.current.y);
+        // Ignore degenerate (zero-area) marquees.
+        if (maxX - minX > 1e-9 || maxY - minY > 1e-9) {
+          dispatch({
+            type: "selectInMarquee",
+            minX,
+            minY,
+            maxX,
+            maxY,
+            additive: marquee.additive,
+          });
+        }
+        setMarquee(null);
         return;
       }
 
       if (!down) return;
-      if (down.moved) return;
-      if (wasDragging) return;
-      if (e.shiftKey || e.ctrlKey || e.metaKey) return;
+      if (down.moved) return; // drag handled (or pan handled)
+      if (wasPanning) return;
+      if (down.wasDoubleClick) return; // double-click already processed
 
-      const svg = svgRef.current;
-      if (!svg) return;
-      const world = clientToWorld(svg, view, e.clientX, e.clientY);
+      // Simple click: select. Shift = toggle (multi-select); else replace.
       dispatch({
         type: "click",
-        ctx: { cursor: world, gridStep, snapRadius, lineTolerance },
+        ctx: makeCtx(cursor),
+        toggle: down.shift,
       });
     },
-    [view, gridStep, snapRadius, lineTolerance, dragSession],
+    [view, makeCtx, marquee],
   );
 
   const onMouseLeave = useCallback(() => {
@@ -294,12 +516,14 @@ export function CadCanvas() {
     panStateRef.current = null;
     setCursorWorld(null);
     setSnap(null);
-    if (dragSession !== null) {
-      dispatch({ type: "endDrag" });
+    setMarquee(null);
+    if (stateRef.current.dragSession || stateRef.current.newLineDraft) {
+      const cursor = cursorWorld ?? { x: 0, y: 0 };
+      dispatch({ type: "endDrag", cursor, ctx: makeCtx(cursor) });
     }
-  }, [dragSession]);
+  }, [cursorWorld, makeCtx]);
 
-  // ── zoom (wheel, imperative for passive: false) ────────────────────────
+  // ── wheel zoom (passive: false) ────────────────────────────────────────
 
   useEffect(() => {
     const svg = svgRef.current;
@@ -328,7 +552,7 @@ export function CadCanvas() {
     return () => svg.removeEventListener("wheel", handler);
   }, [view]);
 
-  // ── aspect-ratio sync ──────────────────────────────────────────────────
+  // ── aspect ratio ───────────────────────────────────────────────────────
 
   useEffect(() => {
     const svg = svgRef.current;
@@ -359,35 +583,24 @@ export function CadCanvas() {
       ) {
         return;
       }
-      const key = e.key.toLowerCase();
-      const itemKeys: Record<string, ItemMode> = {
-        "1": "point",
-        "2": "line",
-        "3": "boundary",
-        "4": "domain",
-      };
-      const actionKeys: Record<string, Action> = {
-        s: "select",
-        d: "delete",
-        c: "create",
-      };
-      if (key in itemKeys) {
-        dispatch({ type: "setItemMode", itemMode: itemKeys[key]! });
-      } else if (key in actionKeys) {
-        dispatch({ type: "setAction", action: actionKeys[key]! });
+      if (e.key === "Delete" || e.key === "Backspace") {
+        e.preventDefault();
+        dispatch({ type: "deleteSelection" });
       } else if (e.key === "Escape") {
         dispatch({ type: "cancel" });
       } else if (e.key === "Enter") {
-        // Enter commits whichever draft is active.
-        dispatch({ type: "commitBoundary" });
-        dispatch({ type: "commitDomain" });
+        // Convenience: Enter creates a domain from the current selection
+        // (handles both the boundary-selected and closed-loop-of-lines cases).
+        dispatch({ type: "createDomainFromSelection" });
+      } else if (e.key === "f" || e.key === "F") {
+        dispatch({ type: "flipSelectedLines" });
       }
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
   }, []);
 
-  // ── visuals scaled by view width ───────────────────────────────────────
+  // ── visual sizing ──────────────────────────────────────────────────────
 
   const pointRadius = view.width * 0.005;
   const lineStroke = view.width * 0.002;
@@ -397,107 +610,37 @@ export function CadCanvas() {
   const selectionHaloStroke = view.width * 0.0018;
   const normalTickLen = view.width * 0.015;
 
-  // Rubber-band preview for line creation.
+  // ── rubber-band preview for new-line draft ─────────────────────────────
+
   const rubberBand = useMemo(() => {
-    if (action !== "create" || itemMode !== "line") return null;
-    if (!lineDraft || !snap) return null;
-    const start = pointsById.get(lineDraft.startPointId);
+    if (!newLineDraft || !cursorWorld) return null;
+    const start = pointsById.get(newLineDraft.startPointId);
     if (!start) return null;
-    return { start: { x: start.x, y: start.y }, end: snap.snapped };
-  }, [action, itemMode, lineDraft, snap, pointsById]);
+    return { start, end: cursorWorld };
+  }, [newLineDraft, cursorWorld, pointsById]);
 
-  // Boundary-draft membership lookup (fast `has` for line rendering).
-  const boundaryDraftSet = useMemo(
-    () => new Set(boundaryDraft),
-    [boundaryDraft],
-  );
+  // ── cursor & status ────────────────────────────────────────────────────
 
-  // Lines belonging to any boundary currently in the domain draft.
-  const domainDraftLines = useMemo(() => {
-    const draftIds = new Set(domainDraft);
-    const lineIds = new Set<string>();
-    for (const b of model.boundaries) {
-      if (!draftIds.has(b.id)) continue;
-      for (const seg of b.segments) lineIds.add(seg.lineId);
-    }
-    return lineIds;
-  }, [domainDraft, model.boundaries]);
+  const cursorClass = dragSession || newLineDraft
+    ? "cad-canvas--grabbing"
+    : "cad-canvas--default";
 
-  // Lines belonging to any committed boundary (rendered in red).
-  const linesInBoundary = useMemo(() => {
-    const ids = new Set<string>();
-    for (const b of model.boundaries) {
-      for (const seg of b.segments) ids.add(seg.lineId);
-    }
-    return ids;
-  }, [model.boundaries]);
-
-  // SVG path "d" attribute, one subpath per boundary per domain.
-  // Each boundary contributes a closed loop of its segments' start vertices.
-  // Multiple boundaries within a domain use even-odd fill to make holes work
-  // (first boundary = exterior; subsequent = holes — by convention).
-  const domainsPathData = useMemo(() => {
-    const boundariesById = new Map(model.boundaries.map((b) => [b.id, b]));
-    const out: string[] = [];
-    for (const domain of model.domains) {
-      for (const bid of domain.boundaryIds) {
-        const boundary = boundariesById.get(bid);
-        if (!boundary || boundary.segments.length < 3) continue;
-        let sub = "";
-        for (let i = 0; i < boundary.segments.length; i++) {
-          const seg = boundary.segments[i]!;
-          const line = model.lines.find((l) => l.id === seg.lineId);
-          if (!line) {
-            sub = "";
-            break;
-          }
-          const startPointId =
-            seg.direction === 1 ? line.startId : line.endId;
-          const p = pointsById.get(startPointId);
-          if (!p) {
-            sub = "";
-            break;
-          }
-          sub += `${i === 0 ? "M" : "L"} ${p.x} ${p.y} `;
-        }
-        if (sub) out.push(sub + "Z");
-      }
-    }
-    return out.join(" ");
-  }, [model.domains, model.boundaries, model.lines, pointsById]);
-
-  // Does the current boundary-draft form a closed loop?
-  const boundaryDraftClosed = useMemo(() => {
-    if (itemMode !== "boundary" || action !== "create") return false;
-    if (boundaryDraft.length === 0) return false;
-    return findClosedLoop(boundaryDraft, model) !== null;
-  }, [itemMode, action, boundaryDraft, model]);
-
-  // ── cursor style cue ───────────────────────────────────────────────────
-
-  const cursorClass =
-    dragSession !== null ? "cad-canvas--grabbing"
-    : action === "delete" ? "cad-canvas--delete"
-    : action === "select" ? "cad-canvas--select"
-    : "cad-canvas--create";
-
-  // ── status text ────────────────────────────────────────────────────────
+  const selectionSummary = useMemo(() => {
+    if (selection.length === 0) return "no selection";
+    if (selection.length === 1) return `1 ${selection[0]!.kind} selected`;
+    return `${selection.length} items selected`;
+  }, [selection]);
 
   const statusBits: string[] = [];
-  statusBits.push(`${itemMode} · ${action}`);
   if (cursorWorld) {
     statusBits.push(`x ${cursorWorld.x.toFixed(3)} y ${cursorWorld.y.toFixed(3)}`);
   }
   statusBits.push(`grid ${gridStep}`);
-  if (lineDraft) statusBits.push("line: place end (Esc to cancel)");
+  if (newLineDraft) statusBits.push("drawing line (release to commit, Esc to cancel)");
   if (dragSession) {
     const n = dragSession.originalPositions.size;
-    statusBits.push(`dragging ${n} point${n === 1 ? "" : "s"} (release to drop)`);
+    statusBits.push(`dragging ${n} point${n === 1 ? "" : "s"}`);
   }
-  if (boundaryDraft.length > 0)
-    statusBits.push(`boundary draft: ${boundaryDraft.length} line(s)`);
-  if (domainDraft.length > 0)
-    statusBits.push(`domain draft: ${domainDraft.length} bdy`);
   statusBits.push(
     `pts ${model.points.length}  lns ${model.lines.length}  bds ${model.boundaries.length}  doms ${model.domains.length}`,
   );
@@ -507,10 +650,11 @@ export function CadCanvas() {
   return (
     <div className="cad-layout">
       <Toolbar
-        itemMode={itemMode}
-        action={action}
-        onItemMode={(m) => dispatch({ type: "setItemMode", itemMode: m })}
-        onAction={(a) => dispatch({ type: "setAction", action: a })}
+        canCreateDomain={canCreateDomain}
+        canDelete={selection.length > 0}
+        selectionSummary={selectionSummary}
+        onCreateDomain={() => dispatch({ type: "createDomainFromSelection" })}
+        onDelete={() => dispatch({ type: "deleteSelection" })}
       />
       <div className="cad-main">
         <div className="cad-canvas-host">
@@ -523,42 +667,30 @@ export function CadCanvas() {
             onMouseMove={onMouseMove}
             onMouseUp={onMouseUp}
             onMouseLeave={onMouseLeave}
-            data-tool={`${itemMode}-${action}`}
           >
             <g transform="scale(1, -1)">
               <Grid view={view} step={gridStep} />
 
-              {/* Domain fills — drawn under lines and points. */}
-              {domainsPathData && (
+              {domainPaths.map((dp, i) => (
                 <path
-                  d={domainsPathData}
+                  key={i}
+                  d={dp.d}
                   fill="var(--boundary)"
-                  fillRule="evenodd"
+                  fillRule={dp.kind === "bounded" ? "evenodd" : "nonzero"}
                   fillOpacity={0.18}
                   pointerEvents="none"
                 />
-              )}
+              ))}
 
-              {/* Straight lines + outward-normal ticks.
-                  The tick at the midpoint is rotated 90° CW from the
-                  start→end direction, i.e. (dy, -dx)/|d|. For a boundary
-                  traversed CCW (the usual exterior convention) this is the
-                  outward direction. Inner-hole loops drawn CW will need
-                  flipping later; revisit when boundary topology informs
-                  the renderer. */}
+              {/* Lines + outward-normal ticks. */}
               <g pointerEvents="none">
                 {model.lines.map((l) => {
                   const start = pointsById.get(l.startId);
                   const end = pointsById.get(l.endId);
                   if (!start || !end) return null;
-                  const isSelected =
-                    selection?.kind === "line" && selection.id === l.id;
-                  const inBoundaryDraft = boundaryDraftSet.has(l.id);
-                  const inDomainDraft = domainDraftLines.has(l.id);
+                  const isSelected = selectedLineIds.has(l.id);
                   const inBoundary = linesInBoundary.has(l.id);
-                  const highlighted =
-                    isSelected || inBoundaryDraft || inDomainDraft;
-                  const stroke = highlighted
+                  const stroke = isSelected
                     ? "var(--accent)"
                     : inBoundary
                       ? "var(--boundary)"
@@ -585,9 +717,7 @@ export function CadCanvas() {
                         x2={end.x}
                         y2={end.y}
                         stroke={stroke}
-                        strokeWidth={
-                          highlighted ? lineStroke * 1.8 : lineStroke
-                        }
+                        strokeWidth={isSelected ? lineStroke * 1.8 : lineStroke}
                         strokeLinecap="round"
                       />
                       {tickEnd && (
@@ -610,8 +740,7 @@ export function CadCanvas() {
               {/* Points. */}
               <g pointerEvents="none">
                 {model.points.map((p) => {
-                  const isSelected =
-                    selection?.kind === "point" && selection.id === p.id;
+                  const isSelected = selectedPointIds.has(p.id);
                   return (
                     <g key={p.id}>
                       {isSelected && (
@@ -635,23 +764,45 @@ export function CadCanvas() {
                 })}
               </g>
 
-              {/* Rubber-band preview (line create). */}
+              {/* New-line rubber band. */}
               {rubberBand && (
                 <line
                   x1={rubberBand.start.x}
                   y1={rubberBand.start.y}
                   x2={rubberBand.end.x}
                   y2={rubberBand.end.y}
-                  stroke="currentColor"
+                  stroke="var(--accent)"
                   strokeWidth={lineStroke}
                   strokeDasharray={`${lineStroke * 4} ${lineStroke * 3}`}
-                  opacity={0.5}
+                  opacity={0.7}
                   pointerEvents="none"
                 />
               )}
 
+              {/* Marquee selection rectangle. */}
+              {marquee && (() => {
+                const minX = Math.min(marquee.start.x, marquee.current.x);
+                const maxX = Math.max(marquee.start.x, marquee.current.x);
+                const minY = Math.min(marquee.start.y, marquee.current.y);
+                const maxY = Math.max(marquee.start.y, marquee.current.y);
+                return (
+                  <rect
+                    x={minX}
+                    y={minY}
+                    width={maxX - minX}
+                    height={maxY - minY}
+                    fill="var(--accent)"
+                    fillOpacity={0.08}
+                    stroke="var(--accent)"
+                    strokeWidth={lineStroke * 0.8}
+                    strokeDasharray={`${lineStroke * 3} ${lineStroke * 2}`}
+                    pointerEvents="none"
+                  />
+                );
+              })()}
+
               {/* Snap indicator. */}
-              {snap && action === "create" && (
+              {snap && (
                 <circle
                   cx={snap.snapped.x}
                   cy={snap.snapped.y}
@@ -659,90 +810,17 @@ export function CadCanvas() {
                   fill="none"
                   stroke="var(--accent)"
                   strokeWidth={snapRingStroke}
-                  opacity={snap.existingPointId ? 1 : 0.75}
+                  opacity={snap.existingPointId ? 1 : 0.6}
                   pointerEvents="none"
                 />
               )}
             </g>
           </svg>
-          {itemMode === "boundary" && action === "create" && (
-            <div
-              className={`cad-banner ${boundaryDraftClosed ? "cad-banner--ready" : ""}`}
-            >
-              <span>
-                {boundaryDraft.length === 0
-                  ? "Click lines to add them to a new boundary."
-                  : `${boundaryDraft.length} line${boundaryDraft.length === 1 ? "" : "s"} selected — ${
-                      boundaryDraftClosed
-                        ? "forms a closed loop."
-                        : "not yet a closed loop."
-                    }`}
-              </span>
-              <div className="cad-banner-actions">
-                <button
-                  type="button"
-                  className="cad-banner-btn cad-banner-btn--primary"
-                  disabled={!boundaryDraftClosed}
-                  onClick={() => dispatch({ type: "commitBoundary" })}
-                  title="Enter"
-                >
-                  Create boundary
-                </button>
-                <button
-                  type="button"
-                  className="cad-banner-btn"
-                  disabled={boundaryDraft.length === 0}
-                  onClick={() => dispatch({ type: "cancel" })}
-                  title="Esc"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
-          {itemMode === "domain" && action === "create" && (
-            <div
-              className={`cad-banner ${domainDraft.length > 0 ? "cad-banner--ready" : ""}`}
-            >
-              <span>
-                {model.boundaries.length === 0
-                  ? "No boundaries to pick from. Create one first."
-                  : domainDraft.length === 0
-                    ? "Tick boundaries in the panel, or click a boundary line on the canvas."
-                    : `${domainDraft.length} boundar${
-                        domainDraft.length === 1 ? "y" : "ies"
-                      } selected.`}
-              </span>
-              <div className="cad-banner-actions">
-                <button
-                  type="button"
-                  className="cad-banner-btn cad-banner-btn--primary"
-                  disabled={domainDraft.length === 0}
-                  onClick={() => dispatch({ type: "commitDomain" })}
-                  title="Enter"
-                >
-                  Create domain
-                </button>
-                <button
-                  type="button"
-                  className="cad-banner-btn"
-                  disabled={domainDraft.length === 0}
-                  onClick={() => dispatch({ type: "cancel" })}
-                  title="Esc"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          )}
           <div className="cad-canvas-status">{statusBits.join("  ·  ")}</div>
         </div>
         <InfoPanel
           model={model}
           selection={selection}
-          itemMode={itemMode}
-          action={action}
-          domainDraft={domainDraft}
           onDispatch={dispatch}
         />
       </div>

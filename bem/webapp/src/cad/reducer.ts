@@ -1,14 +1,24 @@
-// Pure reducer for the CAD editor's domain state.
+// Gesture-driven reducer for the CAD editor.
 //
-// Two independent dimensions in the toolbar:
-//   itemMode ∈ { point, line, boundary, domain }   — what kind of thing
-//   action   ∈ { select, delete, create }          — what to do with it
+// Universal gestures (no modes):
+//   double-click on empty        → add Point at snap
+//   double-click on Point + drag → start drawing a new Line from that point
+//   double-click on Line + drag  → split line at projection + drag new Point
+//   click + drag on Point        → move the Point
+//   click + drag on Line         → translate the Line (both endpoints)
+//   click on entity              → select (replace selection)
+//   ctrl + click on Line         → toggle in multi-selection
+//   click on empty space         → clear selection
 //
-// A click on the canvas dispatches { type: 'click', cursor, ... }. The
-// reducer snaps + hit-tests INTERNALLY using its own state.model so a burst
-// of synchronous clicks each sees the previous action's result.
+// Action buttons (in the small top bar):
+//   Create boundary → from currently selected Lines if they form a closed loop
+//   Create domain   → from currently selected Boundaries
+//   Delete          → remove every selected entity (cascades)
+//
+// Keyboard: Delete/Backspace = Delete; Escape = clear selection + cancel drafts.
 
 import {
+  findAllClosedLoops,
   findClosedLoop,
   projectOntoSegment,
   type Boundary,
@@ -28,51 +38,161 @@ import {
 } from "./operations.js";
 import { snapWorld, type SnapResult } from "./snap.js";
 
-export type ItemMode = "point" | "line" | "boundary" | "domain";
-export type Action = "select" | "delete" | "create";
+// ───────────────────────────────────────────────────────────────────────────
+// Types
+// ───────────────────────────────────────────────────────────────────────────
 
-export type Selection =
+export type SelectionItem =
   | { readonly kind: "point"; readonly id: Id }
   | { readonly kind: "line"; readonly id: Id }
   | { readonly kind: "boundary"; readonly id: Id }
-  | { readonly kind: "domain"; readonly id: Id }
-  | null;
-
-/** First click of a two-click create (currently used for line creation). */
-export interface LineDraft {
-  readonly startPointId: Id;
-}
-
-export interface CanvasState {
-  readonly model: CadModel;
-  readonly itemMode: ItemMode;
-  readonly action: Action;
-  readonly selection: Selection;
-  readonly lineDraft: LineDraft | null;
-  /** Line ids selected while in (boundary, create) mode. */
-  readonly boundaryDraft: readonly Id[];
-  /** Boundary ids selected while in (domain, create) mode. */
-  readonly domainDraft: readonly Id[];
-  /** Active drag — set on mousedown that initiates a drag, cleared on mouseup. */
-  readonly dragSession: DragSession | null;
-}
+  | { readonly kind: "domain"; readonly id: Id };
 
 /**
- * Tracks an in-progress drag. The set of points being dragged each have a
- * snapshot of their position at drag start; on dragTo, the delta from
- * cursorOrigin to the current cursor is added to every original position.
- *
- * - Point drag in select mode: one point in the map.
- * - Line drag in select mode: line's two endpoint ids in the map.
- * - Ctrl-split drag: the new point in the map; cursorOrigin = the snapped
- *   click cursor so the delta starts at zero.
+ * In-progress drag of existing geometry (move-point, move-line, or
+ * split-and-drag). One entry per dragged point; cursorOrigin is the snapped
+ * cursor at drag start.
  */
 export interface DragSession {
   readonly originalPositions: ReadonlyMap<Id, Vec2>;
   readonly cursorOrigin: Vec2;
 }
 
-/** Internal — what a click resolves to after snap + hit-test. */
+/**
+ * In-progress new-line draw, started by double-clicking on a Point and
+ * dragging. The canvas renders a rubber band from this point to the current
+ * cursor; mouseup commits the new line.
+ */
+export interface NewLineDraft {
+  readonly startPointId: Id;
+}
+
+export interface CanvasState {
+  readonly model: CadModel;
+  readonly selection: readonly SelectionItem[];
+  readonly dragSession: DragSession | null;
+  readonly newLineDraft: NewLineDraft | null;
+}
+
+/** Geometric parameters needed to interpret a click/double-click. */
+export interface ClickContext {
+  readonly cursor: Vec2;
+  readonly gridStep: number;
+  readonly snapRadius: number;
+  /** Tolerance (in world units) for cursor-on-line hit testing. */
+  readonly lineTolerance: number;
+}
+
+export type CanvasAction =
+  // Pointer gestures
+  | { readonly type: "click"; readonly ctx: ClickContext; readonly toggle: boolean }
+  | { readonly type: "doubleClick"; readonly ctx: ClickContext }
+  | {
+      readonly type: "startDrag";
+      readonly ctx: ClickContext;
+      readonly toggle: boolean;
+    }
+  | { readonly type: "dragTo"; readonly cursor: Vec2 }
+  | { readonly type: "endDrag"; readonly cursor: Vec2; readonly ctx: ClickContext }
+  // Selection ops
+  | { readonly type: "clearSelection" }
+  | { readonly type: "toggleSelect"; readonly item: SelectionItem }
+  | { readonly type: "selectOnly"; readonly item: SelectionItem }
+  // Buttons
+  | { readonly type: "createDomainFromSelection" }
+  | { readonly type: "deleteSelection" }
+  | { readonly type: "flipSelectedLines" }
+  | {
+      readonly type: "selectInMarquee";
+      readonly minX: number;
+      readonly minY: number;
+      readonly maxX: number;
+      readonly maxY: number;
+      readonly additive: boolean;
+    }
+  | { readonly type: "cancel" };
+
+export const INITIAL_STATE: CanvasState = {
+  model: { points: [], lines: [], boundaries: [], domains: [] },
+  selection: [],
+  dragSession: null,
+  newLineDraft: null,
+};
+
+// ───────────────────────────────────────────────────────────────────────────
+// Reducer
+// ───────────────────────────────────────────────────────────────────────────
+
+export function canvasReducer(
+  state: CanvasState,
+  action: CanvasAction,
+): CanvasState {
+  switch (action.type) {
+    case "click":
+      return applyClick(state, action.ctx, action.toggle);
+
+    case "doubleClick":
+      return applyDoubleClick(state, action.ctx);
+
+    case "startDrag":
+      return startDragForHit(state, action.ctx, action.toggle);
+
+    case "dragTo":
+      return applyDragTo(state, action.cursor);
+
+    case "endDrag":
+      return applyEndDrag(state, action.cursor, action.ctx);
+
+    case "clearSelection":
+      if (state.selection.length === 0) return state;
+      return { ...state, selection: [] };
+
+    case "toggleSelect":
+      return { ...state, selection: toggleItem(state.selection, action.item) };
+
+    case "selectOnly":
+      return { ...state, selection: [action.item] };
+
+    case "createDomainFromSelection":
+      return createDomainFromSelection(state);
+
+    case "deleteSelection":
+      return deleteSelection(state);
+
+    case "flipSelectedLines":
+      return flipSelectedLines(state);
+
+    case "selectInMarquee":
+      return applyMarqueeSelect(
+        state,
+        action.minX,
+        action.minY,
+        action.maxX,
+        action.maxY,
+        action.additive,
+      );
+
+    case "cancel":
+      if (
+        state.selection.length === 0 &&
+        state.dragSession === null &&
+        state.newLineDraft === null
+      ) {
+        return state;
+      }
+      return {
+        ...state,
+        selection: [],
+        dragSession: null,
+        newLineDraft: null,
+      };
+  }
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Click handling
+// ───────────────────────────────────────────────────────────────────────────
+
 interface HitResult {
   readonly entity:
     | { readonly kind: "point"; readonly id: Id }
@@ -81,153 +201,22 @@ interface HitResult {
   readonly snap: SnapResult;
 }
 
-/** Geometric parameters needed to interpret a click. */
-export interface ClickContext {
-  readonly cursor: Vec2;
-  readonly gridStep: number;
-  readonly snapRadius: number;
-  /** How close (in world units) the cursor must be to a line to hit it. */
-  readonly lineTolerance: number;
-}
-
-export type CanvasAction =
-  | { readonly type: "setItemMode"; readonly itemMode: ItemMode }
-  | { readonly type: "setAction"; readonly action: Action }
-  | { readonly type: "click"; readonly ctx: ClickContext }
-  | { readonly type: "cancel" }
-  | { readonly type: "clearSelection" }
-  | { readonly type: "commitBoundary" }
-  | { readonly type: "toggleDomainDraft"; readonly boundaryId: Id }
-  | { readonly type: "commitDomain" }
-  | { readonly type: "flipLine"; readonly lineId: Id }
-  | {
-      readonly type: "ctrlClick";
-      readonly cursor: Vec2;
-      readonly lineTolerance: number;
-      readonly gridStep: number;
-    }
-  | {
-      readonly type: "startSelectDrag";
-      readonly cursor: Vec2;
-      readonly gridStep: number;
-      readonly snapRadius: number;
-      readonly lineTolerance: number;
-    }
-  | { readonly type: "dragTo"; readonly cursor: Vec2 }
-  | { readonly type: "endDrag" };
-
-export const INITIAL_STATE: CanvasState = {
-  model: { points: [], lines: [], boundaries: [], domains: [] },
-  itemMode: "line",
-  action: "create",
-  selection: null,
-  lineDraft: null,
-  boundaryDraft: [],
-  domainDraft: [],
-  dragSession: null,
-};
-
-export function canvasReducer(
-  state: CanvasState,
-  action: CanvasAction,
-): CanvasState {
-  switch (action.type) {
-    case "setItemMode":
-      if (state.itemMode === action.itemMode) return state;
-      return {
-        ...state,
-        itemMode: action.itemMode,
-        lineDraft: null,
-        boundaryDraft: [],
-        domainDraft: [],
-        selection: null,
-      };
-
-    case "setAction":
-      if (state.action === action.action) return state;
-      return {
-        ...state,
-        action: action.action,
-        lineDraft: null,
-        boundaryDraft: [],
-        domainDraft: [],
-      };
-
-    case "cancel":
-      if (
-        state.lineDraft === null &&
-        state.selection === null &&
-        state.boundaryDraft.length === 0 &&
-        state.domainDraft.length === 0
-      ) {
-        return state;
-      }
-      return {
-        ...state,
-        lineDraft: null,
-        selection: null,
-        boundaryDraft: [],
-        domainDraft: [],
-      };
-
-    case "clearSelection":
-      if (state.selection === null) return state;
-      return { ...state, selection: null };
-
-    case "click":
-      return applyClick(state, computeHit(state.model, action.ctx));
-
-    case "commitBoundary":
-      return commitBoundary(state);
-
-    case "toggleDomainDraft":
-      return toggleDomainDraftBoundary(state, action.boundaryId);
-
-    case "commitDomain":
-      return commitDomain(state);
-
-    case "flipLine":
-      return flipLine(state, action.lineId);
-
-    case "ctrlClick":
-      return ctrlClickSplitLine(
-        state,
-        action.cursor,
-        action.lineTolerance,
-        action.gridStep,
-      );
-
-    case "startSelectDrag":
-      return startSelectDrag(
-        state,
-        action.cursor,
-        action.gridStep,
-        action.snapRadius,
-        action.lineTolerance,
-      );
-
-    case "dragTo":
-      return applyDragTo(state, action.cursor);
-
-    case "endDrag":
-      if (state.dragSession === null) return state;
-      return { ...state, dragSession: null };
-  }
+export function hitTest(model: CadModel, ctx: ClickContext): HitResult {
+  return computeHit(model, ctx);
 }
 
 function computeHit(model: CadModel, ctx: ClickContext): HitResult {
-  const snap = snapWorld(ctx.cursor, model.points, ctx.gridStep, ctx.snapRadius);
-
-  // Point hit wins if the snap landed on an existing point.
+  const snap = snapWorld(
+    ctx.cursor,
+    model.points,
+    ctx.gridStep,
+    ctx.snapRadius,
+  );
   if (snap.existingPointId) {
-    return {
-      entity: { kind: "point", id: snap.existingPointId },
-      snap,
-    };
+    return { entity: { kind: "point", id: snap.existingPointId }, snap };
   }
-
-  // Otherwise, line hit-test against straight segments.
   for (const l of model.lines) {
+    if (l.arcCentreId !== undefined) continue;
     const a = model.points.find((p) => p.id === l.startId);
     const b = model.points.find((p) => p.id === l.endId);
     if (!a || !b) continue;
@@ -235,154 +224,92 @@ function computeHit(model: CadModel, ctx: ClickContext): HitResult {
       return { entity: { kind: "line", id: l.id }, snap };
     }
   }
-
   return { entity: null, snap };
 }
 
-function applyClick(state: CanvasState, hit: HitResult): CanvasState {
-  const { itemMode, action } = state;
-
-  // ── SELECT ─────────────────────────────────────────────────────────────
-  if (action === "select") {
-    if (itemMode === "point" && hit.entity?.kind === "point") {
-      return { ...state, selection: { kind: "point", id: hit.entity.id } };
-    }
-    if (itemMode === "line" && hit.entity?.kind === "line") {
-      return { ...state, selection: { kind: "line", id: hit.entity.id } };
-    }
-    // No applicable entity under cursor → clear selection.
-    return state.selection ? { ...state, selection: null } : state;
-  }
-
-  // ── DELETE ─────────────────────────────────────────────────────────────
-  if (action === "delete") {
-    if (itemMode === "point" && hit.entity?.kind === "point") {
-      return deletePoint(state, hit.entity.id);
-    }
-    if (itemMode === "line" && hit.entity?.kind === "line") {
-      return deleteLine(state, hit.entity.id);
-    }
-    return state;
-  }
-
-  // ── CREATE ─────────────────────────────────────────────────────────────
-  if (action === "create") {
-    if (itemMode === "point") {
-      return createPointAt(state, hit.snap);
-    }
-    if (itemMode === "line") {
-      return progressLineCreation(state, hit.snap);
-    }
-    if (itemMode === "boundary") {
-      return toggleBoundaryDraft(state, hit);
-    }
-    if (itemMode === "domain") {
-      return toggleDomainDraftFromCanvas(state, hit);
-    }
-    return state;
-  }
-
-  return state;
-}
-
-function toggleBoundaryDraft(state: CanvasState, hit: HitResult): CanvasState {
-  if (hit.entity?.kind !== "line") return state;
-  const id = hit.entity.id;
-  const draft = state.boundaryDraft.includes(id)
-    ? state.boundaryDraft.filter((x) => x !== id)
-    : [...state.boundaryDraft, id];
-  return { ...state, boundaryDraft: draft };
-}
-
-function commitBoundary(state: CanvasState): CanvasState {
-  const segments = findClosedLoop(state.boundaryDraft, state.model);
-  if (!segments) return state;
-  const boundary: Boundary = {
-    id: newId(),
-    name: `Boundary ${state.model.boundaries.length + 1}`,
-    segments,
-  };
-  return {
-    ...state,
-    model: {
-      ...state.model,
-      boundaries: [...state.model.boundaries, boundary],
-    },
-    boundaryDraft: [],
-    selection: { kind: "boundary", id: boundary.id },
-  };
-}
-
-/**
- * In (domain, create) mode, clicking a line on the canvas toggles the
- * boundary that contains it. If the line belongs to multiple boundaries
- * (e.g. an interior interface), we toggle the first one; the user can
- * pick the others via the side-panel list.
- */
-function toggleDomainDraftFromCanvas(
+function applyClick(
   state: CanvasState,
-  hit: HitResult,
+  ctx: ClickContext,
+  toggle: boolean,
 ): CanvasState {
-  if (hit.entity?.kind !== "line") return state;
-  const lineId = hit.entity.id;
-  const owning = state.model.boundaries.find((b) =>
-    b.segments.some((s) => s.lineId === lineId),
+  const hit = computeHit(state.model, ctx);
+  if (!hit.entity) {
+    // Click on empty space → clear selection (unless this was a toggle).
+    if (toggle) return state;
+    return state.selection.length === 0 ? state : { ...state, selection: [] };
+  }
+  if (toggle) {
+    return { ...state, selection: toggleItem(state.selection, hit.entity) };
+  }
+  // Replace selection.
+  return { ...state, selection: [hit.entity] };
+}
+
+function toggleItem(
+  selection: readonly SelectionItem[],
+  item: SelectionItem,
+): readonly SelectionItem[] {
+  const idx = selection.findIndex(
+    (s) => s.kind === item.kind && s.id === item.id,
   );
-  if (!owning) return state;
-  return toggleDomainDraftBoundary(state, owning.id);
-}
-
-function toggleDomainDraftBoundary(
-  state: CanvasState,
-  boundaryId: Id,
-): CanvasState {
-  const exists = state.domainDraft.includes(boundaryId);
-  const draft = exists
-    ? state.domainDraft.filter((x) => x !== boundaryId)
-    : [...state.domainDraft, boundaryId];
-  return { ...state, domainDraft: draft };
-}
-
-/**
- * Ctrl-click on a line: split that line into two at the projected click
- * position, insert a new point there, and enter drag mode on the new point.
- * Arc-lines are skipped for now (splitting an arc requires re-deriving a
- * compatible centre/radius).
- */
-function ctrlClickSplitLine(
-  state: CanvasState,
-  cursor: Vec2,
-  lineTolerance: number,
-  gridStep: number,
-): CanvasState {
-  for (const line of state.model.lines) {
-    if (line.arcCentreId !== undefined) continue;
-    const a = state.model.points.find((p) => p.id === line.startId);
-    const b = state.model.points.find((p) => p.id === line.endId);
-    if (!a || !b) continue;
-    if (!cursorOnSegment(cursor, a, b, lineTolerance)) continue;
-    return splitLineAtProjection(state, line, a, b, cursor, gridStep);
+  if (idx >= 0) {
+    return selection.filter((_, i) => i !== idx);
   }
-  return state;
+  return [...selection, item];
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Double-click handling — context-sensitive create
+// ───────────────────────────────────────────────────────────────────────────
+
+function applyDoubleClick(state: CanvasState, ctx: ClickContext): CanvasState {
+  const hit = computeHit(state.model, ctx);
+
+  // Empty → add a Point.
+  if (!hit.entity) {
+    if (hit.snap.existingPointId) {
+      // Snap landed on an existing point even though hit-test was empty —
+      // probably degenerate. Just select that point.
+      return {
+        ...state,
+        selection: [{ kind: "point", id: hit.snap.existingPointId }],
+      };
+    }
+    const p = makePoint(hit.snap.snapped.x, hit.snap.snapped.y);
+    return {
+      ...state,
+      model: addPoint(state.model, p),
+      selection: [{ kind: "point", id: p.id }],
+    };
+  }
+
+  // Point → start drawing a new Line from this point.
+  if (hit.entity.kind === "point") {
+    return {
+      ...state,
+      newLineDraft: { startPointId: hit.entity.id },
+      selection: [hit.entity],
+    };
+  }
+
+  // Line → split at projection, drag the new point.
+  return splitLineAtProjection(state, hit.entity.id, ctx);
 }
 
 function splitLineAtProjection(
   state: CanvasState,
-  orig: Line,
-  a: Vec2,
-  b: Vec2,
-  cursor: Vec2,
-  gridStep: number,
+  lineId: Id,
+  ctx: ClickContext,
 ): CanvasState {
-  const projected = projectOntoSegment(cursor, a, b);
+  const orig = state.model.lines.find((l) => l.id === lineId);
+  if (!orig || orig.arcCentreId !== undefined) return state;
+  const a = state.model.points.find((p) => p.id === orig.startId);
+  const b = state.model.points.find((p) => p.id === orig.endId);
+  if (!a || !b) return state;
 
-  const newPoint: Point = {
-    id: newId(),
-    x: projected.x,
-    y: projected.y,
-  };
+  const projected = projectOntoSegment(ctx.cursor, a, b);
+  const newPoint: Point = { id: newId(), x: projected.x, y: projected.y };
 
-  // Two new lines inherit BCs, element count, and nodal positions.
   const line1: Line = {
     id: newId(),
     startId: orig.startId,
@@ -400,13 +327,11 @@ function splitLineAtProjection(
     bcs: orig.bcs,
   };
 
-  // Replace the original line in any boundary's segments. A +1 segment
-  // becomes [line1+1, line2+1]; a -1 segment becomes [line2-1, line1-1]
-  // so the physical traversal direction is preserved.
+  // Fix up containing boundary segments.
   const boundaries = state.model.boundaries.map((bd) => ({
     ...bd,
     segments: bd.segments.flatMap((seg) => {
-      if (seg.lineId !== orig.id) return [seg];
+      if (seg.lineId !== lineId) return [seg];
       return seg.direction === 1
         ? [
             { lineId: line1.id, direction: 1 as const },
@@ -425,96 +350,119 @@ function splitLineAtProjection(
       ...state.model,
       points: [...state.model.points, newPoint],
       lines: state.model.lines.flatMap((l) =>
-        l.id === orig.id ? [line1, line2] : [l],
+        l.id === lineId ? [line1, line2] : [l],
       ),
       boundaries,
     },
-    selection: { kind: "point", id: newPoint.id },
+    selection: [{ kind: "point", id: newPoint.id }],
     dragSession: {
       originalPositions: new Map([
         [newPoint.id, { x: projected.x, y: projected.y }],
       ]),
-      cursorOrigin: snapToGrid(cursor, gridStep),
+      cursorOrigin: snapToGrid(ctx.cursor, ctx.gridStep),
     },
   };
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// Drag handling
+// ───────────────────────────────────────────────────────────────────────────
+
 /**
- * Mousedown in select mode: if the cursor is over an entity matching the
- * itemMode (Point or Line), set selection and start a drag session.
- * In any other case, do nothing — the canvas's regular mouseup/click flow
- * still applies.
+ * Called by the canvas before mousemove dispatching, to set up a drag for an
+ * existing point or line under the cursor. Returns the new state with both
+ * selection (single-replace) and dragSession set.
  */
-function startSelectDrag(
+/**
+ * Mousedown→drag setup. If the hit entity is already part of the current
+ * selection, the WHOLE selection is dragged (all selected Points + all
+ * endpoints of selected Lines). Otherwise the selection is replaced (or
+ * toggled with shift), and only the hit entity is dragged.
+ *
+ * dragTo decides between "single point follows snapped cursor" and
+ * "multi-point translate by snapped delta" based on the size of the
+ * resulting originalPositions map, which is correct in both modes.
+ */
+export function startDragForHit(
   state: CanvasState,
-  cursor: Vec2,
-  gridStep: number,
-  snapRadius: number,
-  lineTolerance: number,
+  ctx: ClickContext,
+  toggle: boolean,
 ): CanvasState {
-  if (state.action !== "select") return state;
-
-  const snap = snapWorld(cursor, state.model.points, gridStep, snapRadius);
-
-  // Point hit — applies in both Point and Line item modes for convenience
-  // (clicking exactly on a point is usually intentional).
-  if (snap.existingPointId) {
-    const point = state.model.points.find(
-      (p) => p.id === snap.existingPointId,
-    );
-    if (!point) return state;
-    if (state.itemMode !== "point" && state.itemMode !== "line") return state;
-    return {
-      ...state,
-      selection: { kind: "point", id: point.id },
-      dragSession: {
-        originalPositions: new Map([[point.id, { x: point.x, y: point.y }]]),
-        cursorOrigin: snapToGrid(cursor, gridStep),
-      },
-    };
+  const hit = computeHit(state.model, ctx);
+  if (!hit.entity) return state;
+  if (hit.entity.kind === "line") {
+    const line = state.model.lines.find((l) => l.id === hit.entity!.id);
+    if (!line || line.arcCentreId !== undefined) return state;
   }
 
-  // Line hit (only meaningful for line item mode).
-  if (state.itemMode === "line") {
-    for (const line of state.model.lines) {
-      if (line.arcCentreId !== undefined) continue;
-      const a = state.model.points.find((p) => p.id === line.startId);
-      const b = state.model.points.find((p) => p.id === line.endId);
-      if (!a || !b) continue;
-      if (!cursorOnSegment(cursor, a, b, lineTolerance)) continue;
-      return {
-        ...state,
-        selection: { kind: "line", id: line.id },
-        dragSession: {
-          originalPositions: new Map([
-            [a.id, { x: a.x, y: a.y }],
-            [b.id, { x: b.x, y: b.y }],
-          ]),
-          cursorOrigin: snapToGrid(cursor, gridStep),
-        },
-      };
+  const hitInSelection = state.selection.some(
+    (s) => s.kind === hit.entity!.kind && s.id === hit.entity!.id,
+  );
+
+  // Decide what to drag and how the selection should look afterwards.
+  let dragItems: readonly SelectionItem[];
+  let newSelection: readonly SelectionItem[];
+  if (hitInSelection) {
+    dragItems = state.selection;
+    newSelection = state.selection;
+  } else if (toggle) {
+    newSelection = toggleItem(state.selection, hit.entity);
+    dragItems = [hit.entity];
+  } else {
+    newSelection = [hit.entity];
+    dragItems = [hit.entity];
+  }
+
+  // Collect the point ids we'll drag (directly-selected points, plus
+  // endpoints of selected lines — deduped via Set).
+  const pointIds = new Set<Id>();
+  for (const item of dragItems) {
+    if (item.kind === "point") {
+      pointIds.add(item.id);
+    } else if (item.kind === "line") {
+      const line = state.model.lines.find((l) => l.id === item.id);
+      if (line && line.arcCentreId === undefined) {
+        pointIds.add(line.startId);
+        pointIds.add(line.endId);
+      }
+    }
+    // Boundaries / Domains: leave alone for now — could later translate
+    // every point of their constituent lines.
+  }
+  if (pointIds.size === 0) {
+    // Nothing actually movable; just update selection.
+    return { ...state, selection: newSelection };
+  }
+
+  const originalPositions = new Map<Id, Vec2>();
+  for (const p of state.model.points) {
+    if (pointIds.has(p.id)) {
+      originalPositions.set(p.id, { x: p.x, y: p.y });
     }
   }
 
-  return state;
+  return {
+    ...state,
+    selection: newSelection,
+    dragSession: {
+      originalPositions,
+      cursorOrigin: snapToGrid(ctx.cursor, ctx.gridStep),
+    },
+  };
 }
 
 function applyDragTo(state: CanvasState, cursor: Vec2): CanvasState {
   const session = state.dragSession;
   if (!session) return state;
 
-  // Single-point drag (select+point, or split-and-drag): the point sits at
-  // the snapped cursor directly. This ensures the result is on the grid even
-  // if the point started off-grid (e.g. after a split-at-projection).
+  // Single-point drag → point follows snapped cursor directly.
   if (session.originalPositions.size === 1) {
     const [pointId] = session.originalPositions.keys();
     if (pointId === undefined) return state;
     return updatePointPosition(state, pointId, cursor);
   }
 
-  // Multi-point drag (select+line): translate by the snapped delta so the
-  // shape of the line is preserved. If the endpoints were already on grid,
-  // they remain on grid; if not, they retain their relative offset.
+  // Multi-point drag → translate by snapped delta.
   const dx = cursor.x - session.cursorOrigin.x;
   const dy = cursor.y - session.cursorOrigin.y;
   if (dx === 0 && dy === 0) return state;
@@ -528,6 +476,67 @@ function applyDragTo(state: CanvasState, cursor: Vec2): CanvasState {
         return { ...p, x: original.x + dx, y: original.y + dy };
       }),
     },
+  };
+}
+
+/**
+ * End of a drag gesture. If a new-line draft is active, commit it (creating
+ * the second endpoint and the line itself). Otherwise just clear the drag
+ * session.
+ */
+function applyEndDrag(
+  state: CanvasState,
+  cursor: Vec2,
+  ctx: ClickContext,
+): CanvasState {
+  // New-line draft commit takes precedence over dragSession (a split-drag
+  // would not set newLineDraft, so this is unambiguous).
+  if (state.newLineDraft) {
+    return commitNewLine(state, cursor, ctx);
+  }
+  if (state.dragSession === null) return state;
+  return { ...state, dragSession: null };
+}
+
+function commitNewLine(
+  state: CanvasState,
+  cursor: Vec2,
+  ctx: ClickContext,
+): CanvasState {
+  const draft = state.newLineDraft;
+  if (!draft) return state;
+
+  // Resolve endpoint: prefer snapping onto an existing point (other than the
+  // start point); otherwise create a new point at the snapped cursor.
+  const snap = snapWorld(cursor, state.model.points, ctx.gridStep, ctx.snapRadius);
+  let model = state.model;
+  let endId: Id;
+  if (snap.existingPointId && snap.existingPointId !== draft.startPointId) {
+    endId = snap.existingPointId;
+  } else if (snap.existingPointId === draft.startPointId) {
+    // Released on the start point — cancel (degenerate line).
+    return { ...state, newLineDraft: null };
+  } else {
+    const p = makePoint(snap.snapped.x, snap.snapped.y);
+    model = addPoint(model, p);
+    endId = p.id;
+  }
+
+  // Also refuse if start and end resolved to the same coordinates (rare).
+  const start = state.model.points.find((p) => p.id === draft.startPointId);
+  if (!start) return { ...state, newLineDraft: null };
+  const end = model.points.find((p) => p.id === endId);
+  if (!end) return { ...state, newLineDraft: null };
+  if (start.x === end.x && start.y === end.y) {
+    return { ...state, newLineDraft: null };
+  }
+
+  const line = makeLine(draft.startPointId, endId);
+  return {
+    ...state,
+    model: addLine(model, line),
+    newLineDraft: null,
+    selection: [{ kind: "line", id: line.id }],
   };
 }
 
@@ -549,116 +558,100 @@ function updatePointPosition(
   };
 }
 
-function snapToGrid(p: Vec2, gridStep: number): Vec2 {
-  return {
-    x: Math.round(p.x / gridStep) * gridStep,
-    y: Math.round(p.y / gridStep) * gridStep,
-  };
-}
+// ───────────────────────────────────────────────────────────────────────────
+// Buttons: create / delete
+// ───────────────────────────────────────────────────────────────────────────
 
 /**
- * Reverse a line's natural direction (swap startId ↔ endId). To keep any
- * containing boundaries traversing the same physical path, every
- * BoundarySegment that references this line gets its direction flipped too.
+ * Create a Domain from the current selection. Combines two sources:
  *
- * The visual outward normal will move to the opposite side (it's computed
- * as right-of-natural-direction).
+ *  - Any already-selected Boundary ids → carried over directly.
+ *  - Any selected Lines that decompose into one or more closed loops →
+ *    each loop becomes a new Boundary; all new boundaries are added to
+ *    the domain.
+ *
+ * For multi-boundary domains (e.g. exterior + hole), lasso-select all
+ * the lines and click Create domain. evenodd fill at render time turns
+ * inner boundaries into actual holes regardless of their orientation.
  */
-function flipLine(state: CanvasState, lineId: Id): CanvasState {
-  const line = state.model.lines.find((l) => l.id === lineId);
-  if (!line) return state;
-  const flipped: Line = {
-    ...line,
-    startId: line.endId,
-    endId: line.startId,
-  };
-  return {
-    ...state,
-    model: {
-      ...state.model,
-      lines: state.model.lines.map((l) => (l.id === lineId ? flipped : l)),
-      boundaries: state.model.boundaries.map((b) => ({
-        ...b,
-        segments: b.segments.map((seg) =>
-          seg.lineId === lineId
-            ? { ...seg, direction: (seg.direction === 1 ? -1 : 1) as 1 | -1 }
-            : seg,
-        ),
-      })),
-    },
-  };
-}
+function createDomainFromSelection(state: CanvasState): CanvasState {
+  const existingBoundaryIds = state.selection
+    .filter((s) => s.kind === "boundary")
+    .map((s) => s.id);
 
-function commitDomain(state: CanvasState): CanvasState {
-  if (state.domainDraft.length === 0) return state;
+  const lineIds = state.selection
+    .filter((s) => s.kind === "line")
+    .map((s) => s.id);
+
+  let model = state.model;
+  const newBoundaryIds: Id[] = [];
+
+  if (lineIds.length > 0) {
+    const loops = findAllClosedLoops(lineIds, state.model);
+    if (loops === null) {
+      // Selected lines don't decompose cleanly into closed loops. If we
+      // had no boundary selection either, the action can't proceed.
+      if (existingBoundaryIds.length === 0) return state;
+    } else {
+      for (const segments of loops) {
+        // model.boundaries grows each iteration, so its length already
+        // accounts for previously-created loops in this commit.
+        const boundary: Boundary = {
+          id: newId(),
+          name: `Boundary ${model.boundaries.length + 1}`,
+          segments: [...segments],
+        };
+        model = {
+          ...model,
+          boundaries: [...model.boundaries, boundary],
+        };
+        newBoundaryIds.push(boundary.id);
+      }
+    }
+  }
+
+  const allBoundaryIds = [...existingBoundaryIds, ...newBoundaryIds];
+  if (allBoundaryIds.length === 0) return state;
+
   const domain: Domain = {
     id: newId(),
-    name: `Domain ${state.model.domains.length + 1}`,
-    boundaryIds: state.domainDraft,
+    name: `Domain ${model.domains.length + 1}`,
+    boundaryIds: allBoundaryIds,
   };
   return {
     ...state,
     model: {
-      ...state.model,
-      domains: [...state.model.domains, domain],
+      ...model,
+      domains: [...model.domains, domain],
     },
-    domainDraft: [],
-    selection: { kind: "domain", id: domain.id },
+    selection: [{ kind: "domain", id: domain.id }],
   };
 }
 
-// ──────────────────────────────────────────────────────────────────────────
-// Action implementations
-// ──────────────────────────────────────────────────────────────────────────
+function deleteSelection(state: CanvasState): CanvasState {
+  if (state.selection.length === 0) return state;
 
-function createPointAt(state: CanvasState, snap: SnapResult): CanvasState {
-  // Don't duplicate an existing point at the snap location.
-  if (snap.existingPointId !== null) return state;
-  return {
-    ...state,
-    model: addPoint(
-      state.model,
-      makePoint(snap.snapped.x, snap.snapped.y),
-    ),
-  };
-}
+  const pointIds = new Set(
+    state.selection.filter((s) => s.kind === "point").map((s) => s.id),
+  );
+  const lineIdsDirect = new Set(
+    state.selection.filter((s) => s.kind === "line").map((s) => s.id),
+  );
+  const boundaryIds = new Set(
+    state.selection.filter((s) => s.kind === "boundary").map((s) => s.id),
+  );
+  const domainIds = new Set(
+    state.selection.filter((s) => s.kind === "domain").map((s) => s.id),
+  );
 
-function progressLineCreation(
-  state: CanvasState,
-  snap: SnapResult,
-): CanvasState {
-  // Resolve the click to a point id, creating one if there isn't one there.
-  let model = state.model;
-  let pointId = snap.existingPointId;
-  if (pointId === null) {
-    const p = makePoint(snap.snapped.x, snap.snapped.y);
-    model = addPoint(model, p);
-    pointId = p.id;
-  }
-
-  if (state.lineDraft === null) {
-    return { ...state, model, lineDraft: { startPointId: pointId } };
-  }
-
-  if (pointId === state.lineDraft.startPointId) {
-    // Same point twice → abort without creating a degenerate line.
-    return { ...state, model, lineDraft: null };
-  }
-
-  return {
-    ...state,
-    model: addLine(model, makeLine(state.lineDraft.startPointId, pointId)),
-    lineDraft: null,
-  };
-}
-
-function deletePoint(state: CanvasState, pointId: Id): CanvasState {
-  // Cascade: any line that uses this point is removed too.
+  // Lines that disappear: directly-selected ones, plus any that referenced
+  // a deleted point.
   const survivingLines = state.model.lines.filter(
     (l) =>
-      l.startId !== pointId &&
-      l.endId !== pointId &&
-      l.arcCentreId !== pointId,
+      !lineIdsDirect.has(l.id) &&
+      !pointIds.has(l.startId) &&
+      !pointIds.has(l.endId) &&
+      (l.arcCentreId === undefined || !pointIds.has(l.arcCentreId)),
   );
   const removedLineIds = new Set(
     state.model.lines
@@ -666,65 +659,135 @@ function deletePoint(state: CanvasState, pointId: Id): CanvasState {
       .map((l) => l.id),
   );
 
-  // Cascade further: boundaries that referenced removed lines drop those
-  // segments. (For now: if a boundary becomes empty, we keep it as empty —
-  // boundary topology repair is its own step.)
-  const boundaries = state.model.boundaries.map((b) => ({
-    ...b,
-    segments: b.segments.filter((s) => !removedLineIds.has(s.lineId)),
-  }));
+  // Boundaries: drop directly-selected. For the rest, drop any segment whose
+  // line was removed (boundary may end up empty — kept as empty for now).
+  const survivingBoundaries = state.model.boundaries
+    .filter((b) => !boundaryIds.has(b.id))
+    .map((b) => ({
+      ...b,
+      segments: b.segments.filter((s) => !removedLineIds.has(s.lineId)),
+    }));
+  const removedBoundaryIds = new Set(
+    state.model.boundaries
+      .filter((b) => !survivingBoundaries.find((sb) => sb.id === b.id))
+      .map((b) => b.id),
+  );
 
-  // Selection: clear if it pointed at something we deleted.
-  const selection =
-    state.selection?.kind === "point" && state.selection.id === pointId
-      ? null
-      : state.selection?.kind === "line" &&
-          removedLineIds.has(state.selection.id)
-        ? null
-        : state.selection;
+  // Domains: drop directly-selected. For the rest, drop refs to removed
+  // boundaries.
+  const survivingDomains = state.model.domains
+    .filter((d) => !domainIds.has(d.id))
+    .map((d) => ({
+      ...d,
+      boundaryIds: d.boundaryIds.filter((id) => !removedBoundaryIds.has(id)),
+    }));
 
   return {
     ...state,
     model: {
       ...state.model,
-      points: state.model.points.filter((p) => p.id !== pointId),
+      points: state.model.points.filter((p) => !pointIds.has(p.id)),
       lines: survivingLines,
-      boundaries,
+      boundaries: survivingBoundaries,
+      domains: survivingDomains,
     },
-    selection,
-    lineDraft:
-      state.lineDraft?.startPointId === pointId ? null : state.lineDraft,
+    selection: [],
   };
 }
-
-function deleteLine(state: CanvasState, lineId: Id): CanvasState {
-  const boundaries = state.model.boundaries.map((b) => ({
-    ...b,
-    segments: b.segments.filter((s) => s.lineId !== lineId),
-  }));
-  const selection =
-    state.selection?.kind === "line" && state.selection.id === lineId
-      ? null
-      : state.selection;
-  return {
-    ...state,
-    model: {
-      ...state.model,
-      lines: state.model.lines.filter((l) => l.id !== lineId),
-      boundaries,
-    },
-    selection,
-  };
-}
-
-// ──────────────────────────────────────────────────────────────────────────
-// Hit-testing helpers (used by the canvas before dispatching a click).
-// Pure functions of model + cursor.
-// ──────────────────────────────────────────────────────────────────────────
 
 /**
- * Returns true if `cursor` is within `tolerance` of the line segment
- * defined by (a, b) — straight-line distance from point to segment.
+ * Flip every Line in the current selection (swap startId↔endId and flip
+ * the corresponding segment.direction in any containing Boundary so the
+ * physical traversal of the boundary is preserved).
+ *
+ * Atomic across the whole selection — one render, one update.
+ */
+/**
+ * Marquee-select: include every Point that sits inside the rect, and every
+ * Line whose *both* endpoints sit inside the rect (strict containment —
+ * cleaner than partial-overlap and matches most editors).
+ *
+ * If `additive` is true, append to the existing selection (skipping items
+ * already in it); otherwise replace.
+ */
+function applyMarqueeSelect(
+  state: CanvasState,
+  minX: number,
+  minY: number,
+  maxX: number,
+  maxY: number,
+  additive: boolean,
+): CanvasState {
+  const inside = (x: number, y: number) =>
+    x >= minX && x <= maxX && y >= minY && y <= maxY;
+  const pById = new Map(state.model.points.map((p) => [p.id, p]));
+
+  const hits: SelectionItem[] = [];
+  for (const p of state.model.points) {
+    if (inside(p.x, p.y)) hits.push({ kind: "point", id: p.id });
+  }
+  for (const l of state.model.lines) {
+    const a = pById.get(l.startId);
+    const b = pById.get(l.endId);
+    if (!a || !b) continue;
+    if (inside(a.x, a.y) && inside(b.x, b.y)) {
+      hits.push({ kind: "line", id: l.id });
+    }
+  }
+
+  if (!additive) {
+    return { ...state, selection: hits };
+  }
+  // Additive: union, preserving order.
+  const seen = new Set(
+    state.selection.map((s) => `${s.kind}:${s.id}`),
+  );
+  const merged: SelectionItem[] = [...state.selection];
+  for (const h of hits) {
+    const key = `${h.kind}:${h.id}`;
+    if (!seen.has(key)) {
+      merged.push(h);
+      seen.add(key);
+    }
+  }
+  return { ...state, selection: merged };
+}
+
+function flipSelectedLines(state: CanvasState): CanvasState {
+  const ids = new Set<Id>();
+  for (const s of state.selection) {
+    if (s.kind === "line") ids.add(s.id);
+  }
+  if (ids.size === 0) return state;
+
+  return {
+    ...state,
+    model: {
+      ...state.model,
+      lines: state.model.lines.map((l) => {
+        if (!ids.has(l.id)) return l;
+        return { ...l, startId: l.endId, endId: l.startId };
+      }),
+      boundaries: state.model.boundaries.map((b) => ({
+        ...b,
+        segments: b.segments.map((seg) => {
+          if (!ids.has(seg.lineId)) return seg;
+          return {
+            ...seg,
+            direction: (seg.direction === 1 ? -1 : 1) as 1 | -1,
+          };
+        }),
+      })),
+    },
+  };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Geometry helpers
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * True if `cursor` is within `tolerance` of the segment from a to b.
  */
 export function cursorOnSegment(
   cursor: Vec2,
@@ -736,7 +799,6 @@ export function cursorOnSegment(
   const dy = b.y - a.y;
   const lenSq = dx * dx + dy * dy;
   if (lenSq === 0) {
-    // Degenerate: distance to point a.
     const ex = cursor.x - a.x;
     const ey = cursor.y - a.y;
     return ex * ex + ey * ey <= tolerance * tolerance;
@@ -748,4 +810,43 @@ export function cursorOnSegment(
   const ex = cursor.x - px;
   const ey = cursor.y - py;
   return ex * ex + ey * ey <= tolerance * tolerance;
+}
+
+function snapToGrid(p: Vec2, gridStep: number): Vec2 {
+  return {
+    x: Math.round(p.x / gridStep) * gridStep,
+    y: Math.round(p.y / gridStep) * gridStep,
+  };
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Derived helpers (used by canvas/UI)
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * Are the selected lines decomposable into one or more closed loops? (Each
+ * loop becomes a Boundary; all become a single Domain.)
+ */
+export function selectionFormsClosedLoop(state: CanvasState): boolean {
+  const lineIds = state.selection
+    .filter((s) => s.kind === "line")
+    .map((s) => s.id);
+  if (lineIds.length === 0) return false;
+  return findAllClosedLoops(lineIds, state.model) !== null;
+}
+
+/** How many boundaries are currently selected (for Create Domain). */
+export function countSelectedBoundaries(state: CanvasState): number {
+  return state.selection.filter((s) => s.kind === "boundary").length;
+}
+
+/**
+ * True if the current selection can be turned into a Domain in one click:
+ *   - ≥1 boundary selected, OR
+ *   - lines forming a closed loop selected.
+ */
+export function selectionCanCreateDomain(state: CanvasState): boolean {
+  return (
+    countSelectedBoundaries(state) > 0 || selectionFormsClosedLoop(state)
+  );
 }

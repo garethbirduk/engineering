@@ -1,127 +1,139 @@
 // RHS info panel.
 //
-// Two modes:
-//   - Normal: show details of the currently-selected entity.
-//   - In (Domain, Create): show a checkable list of existing boundaries so
-//     the user can build the domain by ticking boundaries.
-//
-// All state lives outside this component; it dispatches actions when the
-// boundary picker is in use.
+// Empty selection         → gesture hint.
+// One item selected       → full inspector for that item.
+// More than one selected  → summary with counts by kind.
 
-import type { CadModel, Id } from "@bem/engine";
+import type { CadModel } from "@bem/engine";
 import { pointMap } from "./operations.js";
-import type {
-  Action,
-  CanvasAction,
-  ItemMode,
-  Selection,
-} from "./reducer.js";
+import type { CanvasAction, SelectionItem } from "./reducer.js";
 
 interface InfoPanelProps {
   readonly model: CadModel;
-  readonly selection: Selection;
-  readonly itemMode: ItemMode;
-  readonly action: Action;
-  readonly domainDraft: readonly Id[];
+  readonly selection: readonly SelectionItem[];
   readonly onDispatch: (action: CanvasAction) => void;
 }
 
-export function InfoPanel({
-  model,
-  selection,
-  itemMode,
-  action,
-  domainDraft,
-  onDispatch,
-}: InfoPanelProps) {
-  const isDomainPicker = itemMode === "domain" && action === "create";
-
+export function InfoPanel({ model, selection, onDispatch }: InfoPanelProps) {
   return (
     <aside className="cad-info" aria-label="Inspector">
       <header className="cad-info-header">
-        <h2>{isDomainPicker ? "Pick boundaries" : "Inspector"}</h2>
+        <h2>{headerFor(selection)}</h2>
       </header>
-      <div className="cad-info-body">
-        {isDomainPicker ? (
-          <BoundaryPicker
-            model={model}
-            draft={domainDraft}
-            onToggle={(boundaryId) =>
-              onDispatch({ type: "toggleDomainDraft", boundaryId })
-            }
-          />
-        ) : selection === null ? (
-          <Empty />
-        ) : selection.kind === "point" ? (
-          <PointInfo model={model} pointId={selection.id} />
-        ) : selection.kind === "line" ? (
-          <LineInfo
-            model={model}
-            lineId={selection.id}
-            onDispatch={onDispatch}
-          />
-        ) : selection.kind === "boundary" ? (
-          <BoundaryInfo model={model} boundaryId={selection.id} />
-        ) : (
-          <DomainInfo model={model} domainId={selection.id} />
-        )}
-      </div>
+      <div className="cad-info-body">{renderBody(model, selection, onDispatch)}</div>
     </aside>
   );
 }
 
-// ── boundary picker (only shown in domain+create) ────────────────────────
-
-function BoundaryPicker({
-  model,
-  draft,
-  onToggle,
-}: {
-  model: CadModel;
-  draft: readonly Id[];
-  onToggle: (id: Id) => void;
-}) {
-  if (model.boundaries.length === 0) {
-    return (
-      <p className="cad-info-empty">
-        No boundaries yet. Create one first using <strong>Boundary · Create</strong>.
-      </p>
-    );
-  }
-  const draftSet = new Set(draft);
-  return (
-    <ul className="cad-picker">
-      {model.boundaries.map((b) => {
-        const checked = draftSet.has(b.id);
-        return (
-          <li key={b.id}>
-            <label className={`cad-picker-row${checked ? " cad-picker-row--on" : ""}`}>
-              <input
-                type="checkbox"
-                checked={checked}
-                onChange={() => onToggle(b.id)}
-              />
-              <span className="cad-picker-name">{b.name}</span>
-              <span className="cad-picker-meta">
-                {b.segments.length} segments
-              </span>
-            </label>
-          </li>
-        );
-      })}
-    </ul>
-  );
+function headerFor(selection: readonly SelectionItem[]): string {
+  if (selection.length === 0) return "Inspector";
+  if (selection.length === 1) return "Inspector";
+  return `${selection.length} items`;
 }
 
-// ── selection detail views ───────────────────────────────────────────────
+function renderBody(
+  model: CadModel,
+  selection: readonly SelectionItem[],
+  onDispatch: (action: CanvasAction) => void,
+) {
+  if (selection.length === 0) return <Empty />;
+
+  if (selection.length === 1) {
+    const item = selection[0]!;
+    switch (item.kind) {
+      case "point":
+        return <PointInfo model={model} pointId={item.id} />;
+      case "line":
+        return (
+          <LineInfo model={model} lineId={item.id} onDispatch={onDispatch} />
+        );
+      case "boundary":
+        return <BoundaryInfo model={model} boundaryId={item.id} />;
+      case "domain":
+        return <DomainInfo model={model} domainId={item.id} />;
+    }
+  }
+
+  return <MultiSummary selection={selection} onDispatch={onDispatch} />;
+}
+
+// ── empty / hint ─────────────────────────────────────────────────────────
 
 function Empty() {
   return (
-    <p className="cad-info-empty">
-      Select an item with the Select tool to see its details here.
-    </p>
+    <div className="cad-info-empty">
+      <p>Nothing selected.</p>
+      <ul className="cad-hint">
+        <li>
+          <kbd>dbl-click</kbd> empty space → add a Point
+        </li>
+        <li>
+          <kbd>dbl-click</kbd> + drag a Point → draw a new Line
+        </li>
+        <li>
+          <kbd>dbl-click</kbd> + drag a Line → split + drag new Point
+        </li>
+        <li>
+          <kbd>drag</kbd> a Point → move it
+        </li>
+        <li>
+          <kbd>drag</kbd> a Line → translate it
+        </li>
+        <li>
+          <kbd>shift</kbd>+click → toggle in selection (multi-select)
+        </li>
+        <li>
+          <kbd>drag</kbd> on empty space → lasso-select Points and Lines
+        </li>
+        <li>
+          <kbd>shift</kbd>+drag → pan · <kbd>wheel</kbd> → zoom
+        </li>
+      </ul>
+    </div>
   );
 }
+
+// ── multi-selection summary ──────────────────────────────────────────────
+
+function MultiSummary({
+  selection,
+  onDispatch,
+}: {
+  selection: readonly SelectionItem[];
+  onDispatch: (a: CanvasAction) => void;
+}) {
+  const counts = { point: 0, line: 0, boundary: 0, domain: 0 };
+  for (const s of selection) counts[s.kind]++;
+  return (
+    <>
+      <dl className="cad-info-dl">
+        <Term label="Selected">
+          <ul className="cad-info-bcs">
+            {counts.point > 0 && <li>{counts.point} point{counts.point === 1 ? "" : "s"}</li>}
+            {counts.line > 0 && <li>{counts.line} line{counts.line === 1 ? "" : "s"}</li>}
+            {counts.boundary > 0 && <li>{counts.boundary} boundar{counts.boundary === 1 ? "y" : "ies"}</li>}
+            {counts.domain > 0 && <li>{counts.domain} domain{counts.domain === 1 ? "" : "s"}</li>}
+          </ul>
+        </Term>
+      </dl>
+      {counts.line > 0 && (
+        <div className="cad-info-actions">
+          <button
+            type="button"
+            className="cad-info-btn"
+            onClick={() => onDispatch({ type: "flipSelectedLines" })}
+            title="Flip the direction of every selected line (F)"
+          >
+            Flip {counts.line === 1 ? "line" : `${counts.line} lines`}
+            <kbd>F</kbd>
+          </button>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ── single-entity views ──────────────────────────────────────────────────
 
 function PointInfo({
   model,
@@ -183,10 +195,11 @@ function LineInfo({
         <button
           type="button"
           className="cad-info-btn"
-          onClick={() => onDispatch({ type: "flipLine", lineId })}
-          title="Swap start ↔ end; outward normal flips to the other side"
+          onClick={() => onDispatch({ type: "flipSelectedLines" })}
+          title="Swap start ↔ end; outward normal flips to the other side (F)"
         >
           Flip direction
+          <kbd>F</kbd>
         </button>
       </div>
     </>
