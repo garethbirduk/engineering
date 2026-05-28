@@ -1,5 +1,13 @@
-// Shared geometry / mesh types. Editor model IS engine model — no translation layer.
-// Mirrors the MATLAB 4-file layout (pointInput, lineInput, boundaryInput, domainInput).
+// Geometry + topology + BCs.
+//
+// Three independent layers:
+//   - GEOMETRY     : Points, Lines (straight or arc), Boundaries, Domains
+//   - BCs          : sparse per-Line, per-direction
+//   - DISCRETISATION: not modelled yet — deferred until the analysis engine
+//                     starts consuming the geometry
+//
+// Layer separation lets a single mesh be reused across load cases, and lets
+// the analysis derive elemental BCs from the parent line at solve time.
 
 export type Id = string;
 
@@ -8,20 +16,9 @@ export interface Vec2 {
   readonly y: number;
 }
 
-/** Boundary condition on a single direction at a single node. */
-export type Bc =
-  | { readonly kind: "unknown" }
-  | { readonly kind: "known"; readonly value: number };
+// ── geometry ──────────────────────────────────────────────────────────────
 
-/** Per-line boundary conditions; applied uniformly to every node of every element on the line. */
-export interface LineBcs {
-  readonly dx: Bc;
-  readonly dy: Bc;
-  readonly tx: Bc;
-  readonly ty: Bc;
-}
-
-/** A geometric point. Referenced by id from Lines (start, end, arc centre). */
+/** A geometric point. Referenced by id from Lines and arcCentres. */
 export interface Point {
   readonly id: Id;
   readonly x: number;
@@ -30,20 +27,20 @@ export interface Point {
 
 /**
  * A line segment or circular arc.
+ *
  * - Straight when `arcCentreId` is undefined.
- * - Arc when `arcCentreId` is a Point id — the line curves from `startId` to `endId`
- *   along the circle centred at that point.
- * `localNodes` are the η positions of the three collocation nodes within each element
- * (e.g. [-2/3, 0, 2/3] for the standard discontinuous element).
+ * - Arc when `arcCentreId` is a Point id — curves from `startId` to `endId`
+ *   along the circle centred there.
+ *
+ * Discretisation (element count, nodal η positions) is intentionally NOT
+ * stored on the Line. The analysis pipeline will assign that separately when
+ * needed.
  */
 export interface Line {
   readonly id: Id;
   readonly startId: Id;
   readonly endId: Id;
   readonly arcCentreId?: Id;
-  readonly nElements: number;
-  readonly localNodes: readonly [number, number, number];
-  readonly bcs: LineBcs;
 }
 
 /** Ordered traversal of a Line as part of a Boundary loop. */
@@ -53,27 +50,48 @@ export interface BoundarySegment {
   readonly direction: 1 | -1;
 }
 
-/** A closed loop of Lines forming part of a Domain. */
+/** A closed loop of Lines. */
 export interface Boundary {
   readonly id: Id;
   readonly name: string;
   readonly segments: readonly BoundarySegment[];
 }
 
-/** A Domain is an ordered list of Boundaries. No exterior/hole distinction at this level. */
+/** A Domain is an ordered list of Boundaries. */
 export interface Domain {
   readonly id: Id;
   readonly name: string;
   readonly boundaryIds: readonly Id[];
 }
 
+// ── boundary conditions ──────────────────────────────────────────────────
+
 /**
- * Complete mesh model. Same shape as the CAD editor's working state and as the
- * engine's analysis input.
+ * For a given direction at a line, you specify EITHER the known displacement
+ * OR the known traction (they're duals — one is solved for the other).
+ * No assignment in a direction means the BEM default: t = 0 (free surface).
  */
+export type DirectionBc =
+  | { readonly kind: "displacement"; readonly value: number }
+  | { readonly kind: "traction"; readonly value: number };
+
+/**
+ * Sparse BC assignment for a single Line. Either or both directions may be
+ * unset; unset directions default to t = 0.
+ */
+export interface BcAssignment {
+  readonly lineId: Id;
+  readonly x?: DirectionBc;
+  readonly y?: DirectionBc;
+}
+
+// ── whole model ──────────────────────────────────────────────────────────
+
 export interface CadModel {
   readonly points: readonly Point[];
   readonly lines: readonly Line[];
   readonly boundaries: readonly Boundary[];
   readonly domains: readonly Domain[];
+  /** Sparse — only Lines with an explicit BC appear. Missing = free surface. */
+  readonly bcs: readonly BcAssignment[];
 }

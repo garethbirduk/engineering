@@ -4,8 +4,8 @@
 // One item selected       → full inspector for that item.
 // More than one selected  → summary with counts by kind.
 
-import type { CadModel } from "@bem/engine";
-import { pointMap } from "./operations.js";
+import type { CadModel, DirectionBc, Id } from "@bem/engine";
+import { getBcAssignment, pointMap } from "./operations.js";
 import type { CanvasAction, SelectionItem } from "./reducer.js";
 
 function countSelectedArcs(
@@ -209,6 +209,9 @@ function LineInfo({
   const start = pts.get(l.startId);
   const end = pts.get(l.endId);
   const arcCentre = l.arcCentreId ? pts.get(l.arcCentreId) : undefined;
+  const bc = getBcAssignment(model, lineId);
+  const setBc = (direction: "x" | "y", next: DirectionBc | undefined) =>
+    onDispatch({ type: "setLineBc", lineId, direction, bc: next });
   return (
     <>
       <dl className="cad-info-dl">
@@ -216,19 +219,20 @@ function LineInfo({
         <Term label="From">{start ? coords(start) : "(missing)"}</Term>
         <Term label="To">{end ? coords(end) : "(missing)"}</Term>
         {arcCentre && <Term label="Arc centre">{coords(arcCentre)}</Term>}
-        <Term label="Elements">{l.nElements}</Term>
-        <Term label="Local η">
-          [{l.localNodes.map((n) => fmt(n, 3)).join(", ")}]
-        </Term>
-        <Term label="BCs">
-          <ul className="cad-info-bcs">
-            <li>dx: <BcView bc={l.bcs.dx} /></li>
-            <li>dy: <BcView bc={l.bcs.dy} /></li>
-            <li>tx: <BcView bc={l.bcs.tx} /></li>
-            <li>ty: <BcView bc={l.bcs.ty} /></li>
-          </ul>
-        </Term>
       </dl>
+      <div className="cad-bc-section">
+        <div className="cad-bc-title">Boundary conditions</div>
+        <BcEditor
+          axis="x"
+          bc={bc?.x}
+          onChange={(next) => setBc("x", next)}
+        />
+        <BcEditor
+          axis="y"
+          bc={bc?.y}
+          onChange={(next) => setBc("y", next)}
+        />
+      </div>
       <div className="cad-info-actions">
         <button
           type="button"
@@ -329,6 +333,63 @@ function DomainInfo({
   );
 }
 
+// ── BC editor ────────────────────────────────────────────────────────────
+
+function BcEditor({
+  axis,
+  bc,
+  onChange,
+}: {
+  axis: "x" | "y";
+  bc: DirectionBc | undefined;
+  onChange: (next: DirectionBc | undefined) => void;
+}) {
+  // Defaults when the line has no entry in this direction: traction = 0,
+  // matching the BEM free-surface convention.
+  const kind = bc?.kind ?? "traction";
+  const value = bc?.value ?? 0;
+  const unit = kind === "traction" ? "MPa" : "mm";
+  const tractionId = `bc-${axis}-t`;
+  const dispId = `bc-${axis}-d`;
+
+  return (
+    <div className="cad-bc-row">
+      <span className="cad-bc-axis">{axis.toUpperCase()}</span>
+      <label className="cad-bc-radio" htmlFor={tractionId}>
+        <input
+          id={tractionId}
+          type="radio"
+          name={`bc-${axis}-kind`}
+          checked={kind === "traction"}
+          onChange={() => onChange({ kind: "traction", value })}
+        />
+        t
+      </label>
+      <label className="cad-bc-radio" htmlFor={dispId}>
+        <input
+          id={dispId}
+          type="radio"
+          name={`bc-${axis}-kind`}
+          checked={kind === "displacement"}
+          onChange={() => onChange({ kind: "displacement", value })}
+        />
+        d
+      </label>
+      <input
+        type="number"
+        className="cad-bc-value"
+        value={value}
+        step="any"
+        onChange={(e) => {
+          const v = parseFloat(e.target.value);
+          if (Number.isFinite(v)) onChange({ kind, value: v });
+        }}
+      />
+      <span className="cad-bc-unit">{unit}</span>
+    </div>
+  );
+}
+
 // ── small helpers ────────────────────────────────────────────────────────
 
 function Term({
@@ -356,11 +417,6 @@ function Missing({ kind }: { kind: string }) {
 
 function Mono({ children }: { children: React.ReactNode }) {
   return <code className="cad-info-mono">{children}</code>;
-}
-
-function BcView({ bc }: { bc: { kind: string; value?: number } }) {
-  if (bc.kind === "unknown") return <em>unknown</em>;
-  return <code className="cad-info-mono">= {fmt(bc.value ?? 0)}</code>;
 }
 
 function fmt(n: number, digits = 4): string {

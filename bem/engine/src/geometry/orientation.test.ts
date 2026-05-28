@@ -1,27 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { loopOrientation } from "./orientation.js";
-import type { BoundarySegment, CadModel, Line, LineBcs, Point } from "./types.js";
-
-const BCS: LineBcs = {
-  dx: { kind: "unknown" },
-  dy: { kind: "unknown" },
-  tx: { kind: "unknown" },
-  ty: { kind: "unknown" },
-};
+import type { BoundarySegment, CadModel, Line, Point } from "./types.js";
 
 function P(id: string, x: number, y: number): Point {
   return { id, x, y };
 }
 
 function L(id: string, startId: string, endId: string): Line {
-  return {
-    id,
-    startId,
-    endId,
-    nElements: 1,
-    localNodes: [-2 / 3, 0, 2 / 3],
-    bcs: BCS,
-  };
+  return { id, startId, endId };
 }
 
 function S(lineId: string, direction: 1 | -1 = 1): BoundarySegment {

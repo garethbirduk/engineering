@@ -681,6 +681,8 @@ export function CadCanvas() {
   const selectionHaloRadius = pointRadius * 2.4;
   const selectionHaloStroke = view.width * 0.0018;
   const normalTickLen = view.width * 0.015;
+  const bcTickLen = view.width * 0.012;
+  const bcStroke = view.width * 0.0014;
 
   // ── rubber-band preview for new-line draft ─────────────────────────────
 
@@ -858,6 +860,193 @@ export function CadCanvas() {
                       )}
                     </g>
                   );
+                })}
+              </g>
+
+              {/* BC glyphs.
+                  Displacement (anchor):
+                    tick in the world constrained-axis direction (outward),
+                    short bar at the tip perpendicular to the tick.
+                    The tick goes on the OUTWARD side of the line so the symbol
+                    sits outside the material.
+                  Traction (arrow):
+                    arrow whose body lies in the world traction-axis direction,
+                    sign of the value flips it; arrow drawn on the OUTWARD side
+                    of the line, base on the line, head in the force direction. */}
+              <g pointerEvents="none">
+                {model.bcs.flatMap((bc) => {
+                  const line = model.lines.find((l) => l.id === bc.lineId);
+                  if (!line) return [];
+                  const start = pointsById.get(line.startId);
+                  const end = pointsById.get(line.endId);
+                  if (!start || !end) return [];
+                  const centre = line.arcCentreId
+                    ? pointsById.get(line.arcCentreId)
+                    : undefined;
+                  const els: React.ReactElement[] = [];
+                  const ts = [0.25, 0.5, 0.75];
+                  const tickLen = bcTickLen;
+                  const barHalf = bcTickLen * 0.45;
+                  const arrowHeadLen = bcTickLen * 0.45;
+                  const arrowHeadHalf = bcTickLen * 0.3;
+
+                  for (let i = 0; i < ts.length; i++) {
+                    const t = ts[i]!;
+                    // Sample point + outward normal at that point.
+                    let p: Vec2;
+                    let nx: number;
+                    let ny: number;
+                    if (centre) {
+                      p = arcPoint(start, end, centre, t);
+                      // Tangent at p: rotate radius 90° in the travel direction.
+                      const rx = p.x - centre.x;
+                      const ry = p.y - centre.y;
+                      const rl = Math.hypot(rx, ry) || 1;
+                      const cdx = end.x - start.x;
+                      const cdy = end.y - start.y;
+                      let tdx = -ry / rl;
+                      let tdy = rx / rl;
+                      if (tdx * cdx + tdy * cdy < 0) {
+                        tdx = -tdx;
+                        tdy = -tdy;
+                      }
+                      // Outward normal = right-of-tangent = (tdy, -tdx).
+                      nx = tdy;
+                      ny = -tdx;
+                    } else {
+                      p = {
+                        x: start.x + t * (end.x - start.x),
+                        y: start.y + t * (end.y - start.y),
+                      };
+                      const dx = end.x - start.x;
+                      const dy = end.y - start.y;
+                      const dl = Math.hypot(dx, dy) || 1;
+                      nx = dy / dl;
+                      ny = -dx / dl;
+                    }
+
+                    for (const dir of ["x", "y"] as const) {
+                      const dBc = dir === "x" ? bc.x : bc.y;
+                      if (!dBc) continue;
+
+                      if (dBc.kind === "displacement") {
+                        // Anchor on the outward side. Tick is in the world
+                        // constrained axis (x for dx, y for dy); the sign is
+                        // chosen so the tick points to the outward-normal side.
+                        const axisSign =
+                          dir === "x"
+                            ? nx >= 0
+                              ? 1
+                              : -1
+                            : ny >= 0
+                              ? 1
+                              : -1;
+                        const tipX = dir === "x" ? p.x + axisSign * tickLen : p.x;
+                        const tipY = dir === "y" ? p.y + axisSign * tickLen : p.y;
+                        // Bar at the tip, perpendicular to the tick — in the
+                        // other axis.
+                        const barAX =
+                          dir === "x" ? tipX : tipX - barHalf;
+                        const barAY =
+                          dir === "y" ? tipY : tipY - barHalf;
+                        const barBX =
+                          dir === "x" ? tipX : tipX + barHalf;
+                        const barBY =
+                          dir === "y" ? tipY : tipY + barHalf;
+
+                        els.push(
+                          <line
+                            key={`${bc.lineId}-d${dir}-${i}-tick`}
+                            x1={p.x}
+                            y1={p.y}
+                            x2={tipX}
+                            y2={tipY}
+                            stroke="var(--bc-anchor)"
+                            strokeWidth={bcStroke}
+                            strokeLinecap="round"
+                          />,
+                          <line
+                            key={`${bc.lineId}-d${dir}-${i}-bar`}
+                            x1={barAX}
+                            y1={barAY}
+                            x2={barBX}
+                            y2={barBY}
+                            stroke="var(--bc-anchor)"
+                            strokeWidth={bcStroke}
+                            strokeLinecap="round"
+                          />,
+                        );
+                      } else if (dBc.value !== 0) {
+                        // Traction arrow. Body in world traction-axis direction,
+                        // sign from the value. Base on the line, head in the
+                        // force direction. To keep the symbol on the outward
+                        // side we offset the base by a small amount along the
+                        // outward normal.
+                        const sign = dBc.value > 0 ? 1 : -1;
+                        const bodyLen = tickLen * 1.2;
+                        // Small base offset so the tail doesn't sit exactly on
+                        // the line.
+                        const baseOffset = bcStroke * 1.5;
+                        const baseX = p.x + nx * baseOffset;
+                        const baseY = p.y + ny * baseOffset;
+                        const tipX =
+                          dir === "x"
+                            ? baseX + sign * bodyLen
+                            : baseX;
+                        const tipY =
+                          dir === "y"
+                            ? baseY + sign * bodyLen
+                            : baseY;
+                        // Arrowhead: two short lines from tip back toward base,
+                        // offset perpendicular to the body (so along the OTHER
+                        // axis).
+                        const headBaseX =
+                          dir === "x" ? tipX - sign * arrowHeadLen : tipX;
+                        const headBaseY =
+                          dir === "y" ? tipY - sign * arrowHeadLen : tipY;
+                        const perpDX = dir === "x" ? 0 : arrowHeadHalf;
+                        const perpDY = dir === "x" ? arrowHeadHalf : 0;
+                        const h1X = headBaseX - perpDX;
+                        const h1Y = headBaseY - perpDY;
+                        const h2X = headBaseX + perpDX;
+                        const h2Y = headBaseY + perpDY;
+
+                        els.push(
+                          <line
+                            key={`${bc.lineId}-t${dir}-${i}-body`}
+                            x1={baseX}
+                            y1={baseY}
+                            x2={tipX}
+                            y2={tipY}
+                            stroke="var(--bc-traction)"
+                            strokeWidth={bcStroke}
+                            strokeLinecap="round"
+                          />,
+                          <line
+                            key={`${bc.lineId}-t${dir}-${i}-head1`}
+                            x1={tipX}
+                            y1={tipY}
+                            x2={h1X}
+                            y2={h1Y}
+                            stroke="var(--bc-traction)"
+                            strokeWidth={bcStroke}
+                            strokeLinecap="round"
+                          />,
+                          <line
+                            key={`${bc.lineId}-t${dir}-${i}-head2`}
+                            x1={tipX}
+                            y1={tipY}
+                            x2={h2X}
+                            y2={h2Y}
+                            stroke="var(--bc-traction)"
+                            strokeWidth={bcStroke}
+                            strokeLinecap="round"
+                          />,
+                        );
+                      }
+                    }
+                  }
+                  return els;
                 })}
               </g>
 

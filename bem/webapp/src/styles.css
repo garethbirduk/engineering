@@ -5,6 +5,8 @@
   color: canvastext;
   --accent: #5b8def;
   --boundary: #c44a4a;
+  --bc-anchor: #2a9d8f;
+  --bc-traction: #e76f51;
 }
 
 html,
@@ -298,6 +300,66 @@ body,
 
 .cad-info-btn:hover {
   background: color-mix(in srgb, currentColor 8%, canvas);
+}
+
+.cad-bc-section {
+  margin-top: 0.7rem;
+  padding-top: 0.6rem;
+  border-top: 1px dashed color-mix(in srgb, currentColor 18%, transparent);
+}
+
+.cad-bc-title {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
+  font-weight: 600;
+  margin-bottom: 0.4rem;
+}
+
+.cad-bc-row {
+  display: grid;
+  grid-template-columns: 1.2rem auto auto 1fr 2rem;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  padding: 0.15rem 0;
+}
+
+.cad-bc-axis {
+  font-weight: 600;
+  opacity: 0.7;
+}
+
+.cad-bc-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2rem;
+  cursor: pointer;
+  user-select: none;
+}
+
+.cad-bc-radio input[type="radio"] {
+  margin: 0;
+}
+
+.cad-bc-value {
+  font: inherit;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  text-align: right;
+  padding: 0.15rem 0.35rem;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-radius: 0.25rem;
+  background: canvas;
+  color: inherit;
+  min-width: 0;
+  width: 100%;
+}
+
+.cad-bc-unit {
+  font-size: 0.75rem;
+  opacity: 0.6;
 }
 
 .cad-picker {

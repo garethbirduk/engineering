@@ -1,23 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { findAllClosedLoops, findClosedLoop } from "./closedLoop.js";
-import type { CadModel, Line, LineBcs } from "./types.js";
-
-const BCS: LineBcs = {
-  dx: { kind: "unknown" },
-  dy: { kind: "unknown" },
-  tx: { kind: "unknown" },
-  ty: { kind: "unknown" },
-};
+import type { CadModel, Line } from "./types.js";
 
 function L(id: string, startId: string, endId: string): Line {
-  return {
-    id,
-    startId,
-    endId,
-    nElements: 1,
-    localNodes: [-2 / 3, 0, 2 / 3],
-    bcs: BCS,
-  };
+  return { id, startId, endId };
 }
 
 function model(lines: Line[]): Pick<CadModel, "lines"> {

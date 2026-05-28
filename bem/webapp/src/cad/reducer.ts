@@ -24,8 +24,10 @@ import {
   findClosedLoop,
   mirrorAcrossChord,
   projectOntoSegment,
+  type BcAssignment,
   type Boundary,
   type CadModel,
+  type DirectionBc,
   type Domain,
   type Id,
   type Line,
@@ -111,6 +113,12 @@ export type CanvasAction =
   | { readonly type: "loadModel"; readonly model: CadModel }
   | { readonly type: "newModel" }
   | {
+      readonly type: "setLineBc";
+      readonly lineId: Id;
+      readonly direction: "x" | "y";
+      readonly bc: DirectionBc | undefined;
+    }
+  | {
       readonly type: "selectInMarquee";
       readonly minX: number;
       readonly minY: number;
@@ -121,7 +129,7 @@ export type CanvasAction =
   | { readonly type: "cancel" };
 
 export const INITIAL_STATE: CanvasState = {
-  model: { points: [], lines: [], boundaries: [], domains: [] },
+  model: { points: [], lines: [], boundaries: [], domains: [], bcs: [] },
   selection: [],
   dragSession: null,
   newLineDraft: null,
@@ -184,6 +192,9 @@ export function canvasReducer(
 
     case "newModel":
       return INITIAL_STATE;
+
+    case "setLineBc":
+      return setLineBc(state, action.lineId, action.direction, action.bc);
 
     case "selectInMarquee":
       return applyMarqueeSelect(
@@ -344,18 +355,23 @@ function splitLineAtProjection(
     id: newId(),
     startId: orig.startId,
     endId: newPoint.id,
-    nElements: orig.nElements,
-    localNodes: orig.localNodes,
-    bcs: orig.bcs,
   };
   const line2: Line = {
     id: newId(),
     startId: newPoint.id,
     endId: orig.endId,
-    nElements: orig.nElements,
-    localNodes: orig.localNodes,
-    bcs: orig.bcs,
   };
+
+  // Inherit BCs from the parent line if any — both children get the same
+  // assignment (under the parent's semantics, the whole line carried that
+  // BC, so both halves do too).
+  const origBc = state.model.bcs.find((bc) => bc.lineId === orig.id);
+  const inheritedBcs = origBc
+    ? [
+        { ...origBc, lineId: line1.id },
+        { ...origBc, lineId: line2.id },
+      ]
+    : [];
 
   // Fix up containing boundary segments.
   const boundaries = state.model.boundaries.map((bd) => ({
@@ -383,6 +399,10 @@ function splitLineAtProjection(
         l.id === lineId ? [line1, line2] : [l],
       ),
       boundaries,
+      bcs: [
+        ...state.model.bcs.filter((bc) => bc.lineId !== lineId),
+        ...inheritedBcs,
+      ],
     },
     selection: [{ kind: "point", id: newPoint.id }],
     dragSession: {
@@ -720,6 +740,8 @@ function deleteSelection(state: CanvasState): CanvasState {
       lines: survivingLines,
       boundaries: survivingBoundaries,
       domains: survivingDomains,
+      // BCs follow their line. Drop any whose line was removed.
+      bcs: state.model.bcs.filter((bc) => !removedLineIds.has(bc.lineId)),
     },
     selection: [],
   };
@@ -927,6 +949,40 @@ function flipArcCentre(state: CanvasState, lineId: Id): CanvasState {
         p.id === centre.id ? { ...p, x: mirrored.x, y: mirrored.y } : p,
       ),
     },
+  };
+}
+
+/**
+ * Set (or clear) the BC for one direction (x or y) of one line. Pass
+ * `bc: undefined` to clear (revert that direction to the free-surface
+ * default). If both directions become undefined the whole assignment is
+ * dropped from the sparse array.
+ */
+function setLineBc(
+  state: CanvasState,
+  lineId: Id,
+  direction: "x" | "y",
+  bc: DirectionBc | undefined,
+): CanvasState {
+  if (!state.model.lines.some((l) => l.id === lineId)) return state;
+  const existing = state.model.bcs.find((a) => a.lineId === lineId);
+  const newX = direction === "x" ? bc : existing?.x;
+  const newY = direction === "y" ? bc : existing?.y;
+  const others = state.model.bcs.filter((a) => a.lineId !== lineId);
+  if (!newX && !newY) {
+    return {
+      ...state,
+      model: { ...state.model, bcs: others },
+    };
+  }
+  const next: BcAssignment = {
+    lineId,
+    ...(newX ? { x: newX } : {}),
+    ...(newY ? { y: newY } : {}),
+  };
+  return {
+    ...state,
+    model: { ...state.model, bcs: [...others, next] },
   };
 }
 
