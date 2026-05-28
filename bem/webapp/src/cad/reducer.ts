@@ -31,6 +31,7 @@ import {
   type Domain,
   type Id,
   type Line,
+  type LineDiscretisation,
   type Point,
   type Vec2,
 } from "@bem/engine";
@@ -77,6 +78,8 @@ export interface CanvasState {
   readonly selection: readonly SelectionItem[];
   readonly dragSession: DragSession | null;
   readonly newLineDraft: NewLineDraft | null;
+  /** When true, render the derived mesh overlay (elements + nodes). */
+  readonly meshVisible: boolean;
 }
 
 /** Geometric parameters needed to interpret a click/double-click. */
@@ -119,6 +122,15 @@ export type CanvasAction =
       readonly bc: DirectionBc | undefined;
     }
   | {
+      /**
+       * Set (or clear) the per-line discretisation override. `value: undefined`
+       * removes the entry (line reverts to defaults).
+       */
+      readonly type: "setLineMeshing";
+      readonly lineId: Id;
+      readonly value: Omit<LineDiscretisation, "lineId"> | undefined;
+    }
+  | {
       readonly type: "selectInMarquee";
       readonly minX: number;
       readonly minY: number;
@@ -126,13 +138,15 @@ export type CanvasAction =
       readonly maxY: number;
       readonly additive: boolean;
     }
-  | { readonly type: "cancel" };
+  | { readonly type: "cancel" }
+  | { readonly type: "toggleMesh" };
 
 export const INITIAL_STATE: CanvasState = {
-  model: { points: [], lines: [], boundaries: [], domains: [], bcs: [] },
+  model: { points: [], lines: [], boundaries: [], domains: [], bcs: [], meshing: [] },
   selection: [],
   dragSession: null,
   newLineDraft: null,
+  meshVisible: false,
 };
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -196,6 +210,9 @@ export function canvasReducer(
     case "setLineBc":
       return setLineBc(state, action.lineId, action.direction, action.bc);
 
+    case "setLineMeshing":
+      return setLineMeshing(state, action.lineId, action.value);
+
     case "selectInMarquee":
       return applyMarqueeSelect(
         state,
@@ -205,6 +222,9 @@ export function canvasReducer(
         action.maxY,
         action.additive,
       );
+
+    case "toggleMesh":
+      return { ...state, meshVisible: !state.meshVisible };
 
     case "cancel":
       if (
@@ -373,6 +393,15 @@ function splitLineAtProjection(
       ]
     : [];
 
+  // Same inheritance for meshing overrides.
+  const origMeshing = state.model.meshing.find((m) => m.lineId === orig.id);
+  const inheritedMeshing = origMeshing
+    ? [
+        { ...origMeshing, lineId: line1.id },
+        { ...origMeshing, lineId: line2.id },
+      ]
+    : [];
+
   // Fix up containing boundary segments.
   const boundaries = state.model.boundaries.map((bd) => ({
     ...bd,
@@ -402,6 +431,10 @@ function splitLineAtProjection(
       bcs: [
         ...state.model.bcs.filter((bc) => bc.lineId !== lineId),
         ...inheritedBcs,
+      ],
+      meshing: [
+        ...state.model.meshing.filter((m) => m.lineId !== lineId),
+        ...inheritedMeshing,
       ],
     },
     selection: [{ kind: "point", id: newPoint.id }],
@@ -742,6 +775,10 @@ function deleteSelection(state: CanvasState): CanvasState {
       domains: survivingDomains,
       // BCs follow their line. Drop any whose line was removed.
       bcs: state.model.bcs.filter((bc) => !removedLineIds.has(bc.lineId)),
+      // Same for meshing overrides.
+      meshing: state.model.meshing.filter(
+        (m) => !removedLineIds.has(m.lineId),
+      ),
     },
     selection: [],
   };
@@ -958,6 +995,36 @@ function flipArcCentre(state: CanvasState, lineId: Id): CanvasState {
  * default). If both directions become undefined the whole assignment is
  * dropped from the sparse array.
  */
+function setLineMeshing(
+  state: CanvasState,
+  lineId: Id,
+  value: Omit<LineDiscretisation, "lineId"> | undefined,
+): CanvasState {
+  if (!state.model.lines.some((l) => l.id === lineId)) return state;
+  const others = state.model.meshing.filter((m) => m.lineId !== lineId);
+  if (
+    !value ||
+    (value.elementsPerLine === undefined && value.localNodes === undefined)
+  ) {
+    if (others.length === state.model.meshing.length) return state;
+    return {
+      ...state,
+      model: { ...state.model, meshing: others },
+    };
+  }
+  const next: LineDiscretisation = {
+    lineId,
+    ...(value.elementsPerLine !== undefined
+      ? { elementsPerLine: value.elementsPerLine }
+      : {}),
+    ...(value.localNodes !== undefined ? { localNodes: value.localNodes } : {}),
+  };
+  return {
+    ...state,
+    model: { ...state.model, meshing: [...others, next] },
+  };
+}
+
 function setLineBc(
   state: CanvasState,
   lineId: Id,

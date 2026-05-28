@@ -7,6 +7,7 @@
   --boundary: #c44a4a;
   --bc-anchor: #2a9d8f;
   --bc-traction: #e76f51;
+  --mesh: #1e3a8a;
 }
 
 html,
@@ -360,6 +361,53 @@ body,
 .cad-bc-unit {
   font-size: 0.75rem;
   opacity: 0.6;
+}
+
+.cad-bc-reset {
+  font: inherit;
+  font-size: 0.7rem;
+  margin-left: 0.5rem;
+  padding: 0 0.4rem;
+  border-radius: 0.25rem;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  background: canvas;
+  color: inherit;
+  cursor: pointer;
+  text-transform: none;
+  letter-spacing: 0;
+  opacity: 0.7;
+}
+
+.cad-bc-reset:hover {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 8%, canvas);
+}
+
+.cad-mesh-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 0.5rem;
+  align-items: center;
+  padding: 0.15rem 0;
+  font-size: 0.85rem;
+}
+
+.cad-mesh-label {
+  opacity: 0.8;
+}
+
+.cad-mesh-int {
+  max-width: 4.5rem;
+}
+
+.cad-mesh-etas {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 0.3rem;
+}
+
+.cad-mesh-eta {
+  width: 100%;
 }
 
 .cad-picker {

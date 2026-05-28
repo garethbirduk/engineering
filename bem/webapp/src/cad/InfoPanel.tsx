@@ -4,8 +4,14 @@
 // One item selected       → full inspector for that item.
 // More than one selected  → summary with counts by kind.
 
-import type { CadModel, DirectionBc, Id } from "@bem/engine";
-import { getBcAssignment, pointMap } from "./operations.js";
+import type { CadModel, DirectionBc, Id, LineDiscretisation } from "@bem/engine";
+import {
+  DEFAULT_ELEMENTS_PER_LINE,
+  DEFAULT_LOCAL_NODES,
+  getBcAssignment,
+  getLineDiscretisation,
+  pointMap,
+} from "./operations.js";
 import type { CanvasAction, SelectionItem } from "./reducer.js";
 
 function countSelectedArcs(
@@ -212,6 +218,10 @@ function LineInfo({
   const bc = getBcAssignment(model, lineId);
   const setBc = (direction: "x" | "y", next: DirectionBc | undefined) =>
     onDispatch({ type: "setLineBc", lineId, direction, bc: next });
+  const meshing = getLineDiscretisation(model, lineId);
+  const setMeshing = (
+    next: Omit<LineDiscretisation, "lineId"> | undefined,
+  ) => onDispatch({ type: "setLineMeshing", lineId, value: next });
   return (
     <>
       <dl className="cad-info-dl">
@@ -233,6 +243,7 @@ function LineInfo({
           onChange={(next) => setBc("y", next)}
         />
       </div>
+      <MeshingEditor meshing={meshing} onChange={setMeshing} />
       <div className="cad-info-actions">
         <button
           type="button"
@@ -331,6 +342,111 @@ function DomainInfo({
       </Term>
     </dl>
   );
+}
+
+// ── Meshing editor ───────────────────────────────────────────────────────
+
+function MeshingEditor({
+  meshing,
+  onChange,
+}: {
+  meshing: LineDiscretisation | undefined;
+  onChange: (next: Omit<LineDiscretisation, "lineId"> | undefined) => void;
+}) {
+  const elements = meshing?.elementsPerLine ?? DEFAULT_ELEMENTS_PER_LINE;
+  const localNodes = meshing?.localNodes ?? DEFAULT_LOCAL_NODES;
+  const isDefault =
+    !meshing ||
+    (meshing.elementsPerLine === undefined &&
+      meshing.localNodes === undefined);
+
+  const setElements = (n: number) => {
+    if (!Number.isFinite(n) || n < 1) return;
+    const intN = Math.max(1, Math.floor(n));
+    const useDefault = intN === DEFAULT_ELEMENTS_PER_LINE;
+    onChange({
+      ...(useDefault ? {} : { elementsPerLine: intN }),
+      ...(meshing?.localNodes !== undefined
+        ? { localNodes: meshing.localNodes }
+        : {}),
+    });
+  };
+
+  const setLocal = (idx: 0 | 1 | 2, v: number) => {
+    if (!Number.isFinite(v)) return;
+    const next: [number, number, number] = [
+      localNodes[0]!,
+      localNodes[1]!,
+      localNodes[2]!,
+    ];
+    next[idx] = v;
+    // If the user happens to type the defaults back in, clear the override.
+    const isDefaultLocal =
+      next[0] === DEFAULT_LOCAL_NODES[0] &&
+      next[1] === DEFAULT_LOCAL_NODES[1] &&
+      next[2] === DEFAULT_LOCAL_NODES[2];
+    onChange({
+      ...(meshing?.elementsPerLine !== undefined
+        ? { elementsPerLine: meshing.elementsPerLine }
+        : {}),
+      ...(isDefaultLocal ? {} : { localNodes: next }),
+    });
+  };
+
+  return (
+    <div className="cad-bc-section">
+      <div className="cad-bc-title">
+        Meshing
+        {!isDefault && (
+          <button
+            type="button"
+            className="cad-bc-reset"
+            onClick={() => onChange(undefined)}
+            title="Reset to defaults (2 elements, η = ±2/3, 0)"
+          >
+            reset
+          </button>
+        )}
+      </div>
+      <div className="cad-mesh-row">
+        <label className="cad-mesh-label" htmlFor="mesh-n">
+          Elements on this line
+        </label>
+        <input
+          id="mesh-n"
+          type="number"
+          className="cad-bc-value cad-mesh-int"
+          min={1}
+          step={1}
+          value={elements}
+          onChange={(e) => setElements(parseInt(e.target.value, 10))}
+        />
+      </div>
+      <div className="cad-mesh-row">
+        <label className="cad-mesh-label">Local coords</label>
+        <div className="cad-mesh-etas">
+          {([0, 1, 2] as const).map((i) => (
+            <input
+              key={i}
+              type="number"
+              className="cad-bc-value cad-mesh-eta"
+              step="any"
+              value={formatEta(localNodes[i]!)}
+              onChange={(e) => setLocal(i, parseFloat(e.target.value))}
+              title={`η_${i + 1} ∈ [-1, +1]`}
+            />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Show η = ±2/3 etc. as a 4-dp decimal, trimming trailing zeros. */
+function formatEta(n: number): string {
+  if (!Number.isFinite(n)) return "0";
+  if (Number.isInteger(n)) return n.toString();
+  return parseFloat(n.toFixed(4)).toString();
 }
 
 // ── BC editor ────────────────────────────────────────────────────────────

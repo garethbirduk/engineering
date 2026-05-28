@@ -6,6 +6,7 @@ import type {
   DirectionBc,
   Id,
   Line,
+  LineDiscretisation,
   Point,
 } from "@bem/engine";
 
@@ -15,7 +16,24 @@ export const EMPTY_MODEL: CadModel = {
   boundaries: [],
   domains: [],
   bcs: [],
+  meshing: [],
 };
+
+/** Default discretisation when a line has no entry in `model.meshing`. */
+export const DEFAULT_ELEMENTS_PER_LINE = 2;
+export const DEFAULT_LOCAL_NODES: readonly [number, number, number] = [
+  -2 / 3,
+  0,
+  2 / 3,
+];
+
+/** Look up the per-line meshing override; undefined if defaults apply. */
+export function getLineDiscretisation(
+  model: CadModel,
+  lineId: Id,
+): LineDiscretisation | undefined {
+  return model.meshing.find((m) => m.lineId === lineId);
+}
 
 export function newId(): Id {
   return crypto.randomUUID();

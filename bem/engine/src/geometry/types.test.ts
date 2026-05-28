@@ -17,6 +17,7 @@ describe("geometry types — smoke", () => {
       boundaries: [],
       domains: [],
       bcs: [bc],
+      meshing: [],
     };
     expect(model.points).toHaveLength(2);
     expect(model.lines[0]?.arcCentreId).toBeUndefined();

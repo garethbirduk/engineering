@@ -28,7 +28,9 @@ import {
 import {
   arcPoint,
   arcSvgPathD,
+  discretiseLines,
   loopOrientation,
+  type MeshElement,
   type Vec2,
 } from "@bem/engine";
 import { Toolbar } from "./Toolbar.js";
@@ -151,7 +153,7 @@ export function CadCanvas() {
   const [cursorWorld, setCursorWorld] = useState<Vec2 | null>(null);
   const [snap, setSnap] = useState<ReturnType<typeof snapWorld> | null>(null);
 
-  const { model, selection, dragSession, newLineDraft } = state;
+  const { model, selection, dragSession, newLineDraft, meshVisible } = state;
 
   // Reducer is pure but startDragForHit composes selection + dragSession;
   // we keep a ref to the latest state for use inside refs/handlers that
@@ -189,6 +191,23 @@ export function CadCanvas() {
   const snapRadius = gridStep;
   const lineTolerance = gridStep * 0.15;
   const pointsById = useMemo(() => pointMap(model.points), [model.points]);
+
+  // Derived mesh — always recomputed (cheap; pure of inputs). Visualisation
+  // and BC-glyph sample positions both consume it; rendering of the elements
+  // themselves is gated on meshVisible.
+  const meshElements: MeshElement[] = useMemo(
+    () => discretiseLines(model),
+    [model],
+  );
+  const elementsByLineId = useMemo(() => {
+    const m = new Map<string, MeshElement[]>();
+    for (const el of meshElements) {
+      const arr = m.get(el.lineId);
+      if (arr) arr.push(el);
+      else m.set(el.lineId, [el]);
+    }
+    return m;
+  }, [meshElements]);
 
   const makeCtx = useCallback(
     (cursor: Vec2): ClickContext => ({
@@ -683,6 +702,9 @@ export function CadCanvas() {
   const normalTickLen = view.width * 0.015;
   const bcTickLen = view.width * 0.012;
   const bcStroke = view.width * 0.0014;
+  const meshStroke = view.width * 0.0016;
+  const meshNodeRadius = view.width * 0.005;
+  const meshEndTickLen = view.width * 0.008;
 
   // ── rubber-band preview for new-line draft ─────────────────────────────
 
@@ -726,9 +748,11 @@ export function CadCanvas() {
       <Toolbar
         canCreateDomain={canCreateDomain}
         canDelete={selection.length > 0}
+        meshVisible={meshVisible}
         selectionSummary={selectionSummary}
         onCreateDomain={() => dispatch({ type: "createDomainFromSelection" })}
         onDelete={() => dispatch({ type: "deleteSelection" })}
+        onToggleMesh={() => dispatch({ type: "toggleMesh" })}
         onSave={handleSave}
         onLoad={handleLoad}
         onNew={handleNew}
@@ -863,6 +887,134 @@ export function CadCanvas() {
                 })}
               </g>
 
+              {/* Mesh overlay (toggled). Elements coincide with the parent
+                  geometry — same path, just stroked in navy on top — with
+                  short perpendicular end ticks bracketing each element and
+                  3 open circles at the 3 node positions (η = -2/3, 0, +2/3). */}
+              {meshVisible && (
+                <g pointerEvents="none">
+                  {meshElements.flatMap((el) => {
+                    const line = model.lines.find((l) => l.id === el.lineId);
+                    if (!line) return [];
+                    const lineStart = pointsById.get(line.startId);
+                    const lineEnd = pointsById.get(line.endId);
+                    if (!lineStart || !lineEnd) return [];
+                    const centre = line.arcCentreId
+                      ? pointsById.get(line.arcCentreId)
+                      : undefined;
+
+                    // Outward normal at parametric t along the line (used only
+                    // for the perpendicular end-tick orientation).
+                    const normalAt = (t: number): Vec2 => {
+                      if (centre) {
+                        const p = arcPoint(lineStart, lineEnd, centre, t);
+                        const rx = p.x - centre.x;
+                        const ry = p.y - centre.y;
+                        const rl = Math.hypot(rx, ry) || 1;
+                        const cdx = lineEnd.x - lineStart.x;
+                        const cdy = lineEnd.y - lineStart.y;
+                        let tdx = -ry / rl;
+                        let tdy = rx / rl;
+                        if (tdx * cdx + tdy * cdy < 0) {
+                          tdx = -tdx;
+                          tdy = -tdy;
+                        }
+                        return { x: tdy, y: -tdx };
+                      }
+                      const dx = lineEnd.x - lineStart.x;
+                      const dy = lineEnd.y - lineStart.y;
+                      const dl = Math.hypot(dx, dy) || 1;
+                      return { x: dy / dl, y: -dx / dl };
+                    };
+
+                    // Build the rail ON the geometry. For arcs, sample 9
+                    // points so the rail follows the curve; for straight, 2
+                    // endpoints suffice.
+                    const rail: Vec2[] = [];
+                    const N = centre ? 9 : 2;
+                    for (let i = 0; i < N; i++) {
+                      const local = i / (N - 1);
+                      const t = el.tStart + local * (el.tEnd - el.tStart);
+                      const p = centre
+                        ? arcPoint(lineStart, lineEnd, centre, t)
+                        : {
+                            x: lineStart.x + t * (lineEnd.x - lineStart.x),
+                            y: lineStart.y + t * (lineEnd.y - lineStart.y),
+                          };
+                      rail.push(p);
+                    }
+                    const railD = rail
+                      .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`)
+                      .join(" ");
+
+                    // End ticks: perpendicular bars crossing the line at
+                    // tStart and tEnd, centred on the line.
+                    const startNormal = normalAt(el.tStart);
+                    const endNormal = normalAt(el.tEnd);
+                    const startTickA = {
+                      x: el.start.x - startNormal.x * meshEndTickLen,
+                      y: el.start.y - startNormal.y * meshEndTickLen,
+                    };
+                    const startTickB = {
+                      x: el.start.x + startNormal.x * meshEndTickLen,
+                      y: el.start.y + startNormal.y * meshEndTickLen,
+                    };
+                    const endTickA = {
+                      x: el.end.x - endNormal.x * meshEndTickLen,
+                      y: el.end.y - endNormal.y * meshEndTickLen,
+                    };
+                    const endTickB = {
+                      x: el.end.x + endNormal.x * meshEndTickLen,
+                      y: el.end.y + endNormal.y * meshEndTickLen,
+                    };
+
+                    // 3 open nodes ON the line at η = -2/3, 0, +2/3.
+                    const nodeCircles = el.nodes.map((node, i) => (
+                      <circle
+                        key={`n${i}`}
+                        cx={node.x}
+                        cy={node.y}
+                        r={meshNodeRadius}
+                        fill="none"
+                        stroke="var(--mesh)"
+                        strokeWidth={meshStroke}
+                      />
+                    ));
+
+                    return [
+                      <g key={`${el.lineId}-${el.indexInLine}`}>
+                        <path
+                          d={railD}
+                          fill="none"
+                          stroke="var(--mesh)"
+                          strokeWidth={meshStroke}
+                          strokeLinecap="round"
+                        />
+                        <line
+                          x1={startTickA.x}
+                          y1={startTickA.y}
+                          x2={startTickB.x}
+                          y2={startTickB.y}
+                          stroke="var(--mesh)"
+                          strokeWidth={meshStroke}
+                          strokeLinecap="round"
+                        />
+                        <line
+                          x1={endTickA.x}
+                          y1={endTickA.y}
+                          x2={endTickB.x}
+                          y2={endTickB.y}
+                          stroke="var(--mesh)"
+                          strokeWidth={meshStroke}
+                          strokeLinecap="round"
+                        />
+                        {nodeCircles}
+                      </g>,
+                    ];
+                  })}
+                </g>
+              )}
+
               {/* BC glyphs.
                   Displacement (anchor):
                     tick in the world constrained-axis direction (outward),
@@ -884,14 +1036,31 @@ export function CadCanvas() {
                     ? pointsById.get(line.arcCentreId)
                     : undefined;
                   const els: React.ReactElement[] = [];
-                  const ts = [0.25, 0.5, 0.75];
                   const tickLen = bcTickLen;
                   const barHalf = bcTickLen * 0.45;
                   const arrowHeadLen = bcTickLen * 0.45;
                   const arrowHeadHalf = bcTickLen * 0.3;
 
-                  for (let i = 0; i < ts.length; i++) {
-                    const t = ts[i]!;
+                  // Sample positions on the line.
+                  //   mesh on  → at the mesh nodes (the discrete BC points
+                  //              the analysis would use). Honours per-line
+                  //              discretisation overrides automatically since
+                  //              we read straight off the derived elements.
+                  //   mesh off → 5 evenly-spaced geometric points
+                  let sampleTs: number[];
+                  if (meshVisible) {
+                    const els2 = elementsByLineId.get(line.id);
+                    if (els2 && els2.length > 0) {
+                      sampleTs = els2.flatMap((el) => [...el.nodeTs]);
+                    } else {
+                      sampleTs = [0, 0.25, 0.5, 0.75, 1];
+                    }
+                  } else {
+                    sampleTs = [0, 0.25, 0.5, 0.75, 1];
+                  }
+
+                  for (let i = 0; i < sampleTs.length; i++) {
+                    const t = sampleTs[i]!;
                     // Sample point + outward normal at that point.
                     let p: Vec2;
                     let nx: number;

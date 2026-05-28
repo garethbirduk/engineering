@@ -85,6 +85,19 @@ export interface BcAssignment {
   readonly y?: DirectionBc;
 }
 
+// ── discretisation overrides ─────────────────────────────────────────────
+
+/**
+ * Per-line override of the default discretisation (2 elements, η = ±2/3, 0).
+ * Both fields are optional; missing fields fall back to the defaults.
+ * Sparse: a Line with no entry uses defaults entirely.
+ */
+export interface LineDiscretisation {
+  readonly lineId: Id;
+  readonly elementsPerLine?: number;
+  readonly localNodes?: readonly [number, number, number];
+}
+
 // ── whole model ──────────────────────────────────────────────────────────
 
 export interface CadModel {
@@ -94,4 +107,6 @@ export interface CadModel {
   readonly domains: readonly Domain[];
   /** Sparse — only Lines with an explicit BC appear. Missing = free surface. */
   readonly bcs: readonly BcAssignment[];
+  /** Sparse — only Lines with non-default discretisation appear. */
+  readonly meshing: readonly LineDiscretisation[];
 }

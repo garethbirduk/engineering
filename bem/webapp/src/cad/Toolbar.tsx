@@ -7,9 +7,11 @@
 interface ToolbarProps {
   readonly canCreateDomain: boolean;
   readonly canDelete: boolean;
+  readonly meshVisible: boolean;
   readonly selectionSummary: string;
   readonly onCreateDomain: () => void;
   readonly onDelete: () => void;
+  readonly onToggleMesh: () => void;
   readonly onSave: () => void;
   readonly onLoad: () => void;
   readonly onNew: () => void;
@@ -18,9 +20,11 @@ interface ToolbarProps {
 export function Toolbar({
   canCreateDomain,
   canDelete,
+  meshVisible,
   selectionSummary,
   onCreateDomain,
   onDelete,
+  onToggleMesh,
   onSave,
   onLoad,
   onNew,
@@ -53,6 +57,16 @@ export function Toolbar({
       <div className="cad-toolbar-status" aria-live="polite">
         {selectionSummary}
       </div>
+      <div className="cad-toolgroup-sep" aria-hidden="true" />
+      <button
+        type="button"
+        className={`cad-tool ${meshVisible ? "cad-tool--active" : ""}`}
+        onClick={onToggleMesh}
+        aria-pressed={meshVisible}
+        title="Show / hide the derived mesh (2 quadratic elements per line)"
+      >
+        Mesh
+      </button>
       <div className="cad-toolgroup-sep" aria-hidden="true" />
       <div className="cad-toolgroup" aria-label="File">
         <button

@@ -8,14 +8,15 @@ const emptyModel: CadModel = {
   boundaries: [],
   domains: [],
   bcs: [],
+  meshing: [],
 };
 
-describe("serialize / deserialize (v2)", () => {
+describe("serialize / deserialize (v3)", () => {
   it("round-trips an empty model", () => {
     expect(deserialize(serialize(emptyModel))).toEqual(emptyModel);
   });
 
-  it("round-trips a model with arcs and BCs", () => {
+  it("round-trips a model with arcs, BCs, and per-line meshing overrides", () => {
     const model: CadModel = {
       points: [
         { id: "p1", x: 0, y: 0 },
@@ -34,6 +35,9 @@ describe("serialize / deserialize (v2)", () => {
           y: { kind: "traction", value: -5 },
         },
       ],
+      meshing: [
+        { lineId: "l1", elementsPerLine: 4, localNodes: [-1, 0, 1] },
+      ],
     };
     expect(deserialize(serialize(model))).toEqual(model);
   });
@@ -51,13 +55,42 @@ describe("serialize / deserialize (v2)", () => {
   it("rejects a model missing required arrays", () => {
     const bad = JSON.stringify({
       version: CURRENT_SCHEMA_VERSION,
-      model: { points: [], lines: [], boundaries: [], domains: [] }, // no bcs
+      model: {
+        points: [],
+        lines: [],
+        boundaries: [],
+        domains: [],
+        bcs: [],
+      }, // no meshing
     });
     expect(() => deserialize(bad)).toThrow(/missing required arrays/);
   });
 
   it("rejects non-JSON", () => {
     expect(() => deserialize("not json")).toThrow(/Not valid JSON/);
+  });
+});
+
+describe("v2 → v3 migration", () => {
+  it("adds an empty meshing array to v2 models", () => {
+    const v2 = JSON.stringify({
+      version: 2,
+      model: {
+        points: [],
+        lines: [],
+        boundaries: [],
+        domains: [],
+        bcs: [],
+      },
+    });
+    expect(deserialize(v2)).toEqual({
+      points: [],
+      lines: [],
+      boundaries: [],
+      domains: [],
+      bcs: [],
+      meshing: [],
+    });
   });
 });
 

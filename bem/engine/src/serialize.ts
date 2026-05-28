@@ -2,12 +2,14 @@
 // older saved files keep loading.
 //
 // Format on disk:
-//   { "version": N, "model": { points, lines, boundaries, domains, bcs } }
+//   { "version": N, "model": { points, lines, boundaries, domains, bcs, meshing } }
 //
 // Versions:
 //   1 — initial. Line had { bcs, nElements, localNodes }. No top-level bcs.
-//   2 — current. Line is pure geometry. Top-level bcs[] sparse array with
-//       new DirectionBc shape ({ kind: "displacement" | "traction", value }).
+//   2 — Line is pure geometry. Top-level bcs[] sparse array with new
+//       DirectionBc shape ({ kind: "displacement" | "traction", value }).
+//   3 — current. Adds top-level meshing[] sparse array — per-line overrides
+//       of element count and local node η coords. Missing = use defaults.
 
 import type {
   BcAssignment,
@@ -16,7 +18,7 @@ import type {
   Line,
 } from "./geometry/types.js";
 
-export const CURRENT_SCHEMA_VERSION = 2;
+export const CURRENT_SCHEMA_VERSION = 3;
 
 export interface SerializedModel {
   readonly version: number;
@@ -43,17 +45,20 @@ export function deserialize(json: string): CadModel {
   }
   const v = parsed["version"];
   if (v === 1) {
-    return migrateV1(parsed["model"]);
+    return migrateV2ToV3(migrateV1(parsed["model"]));
+  }
+  if (v === 2) {
+    return migrateV2ToV3(extractV2Model(parsed["model"]));
   }
   if (v !== CURRENT_SCHEMA_VERSION) {
     throw new Error(
-      `Unsupported schema version ${String(v)} (expected ${CURRENT_SCHEMA_VERSION} or 1)`,
+      `Unsupported schema version ${String(v)} (expected ${CURRENT_SCHEMA_VERSION}, 2, or 1)`,
     );
   }
   const m = parsed["model"];
   if (!isModelShape(m)) {
     throw new Error(
-      "Model is missing required arrays (points, lines, boundaries, domains, bcs)",
+      "Model is missing required arrays (points, lines, boundaries, domains, bcs, meshing)",
     );
   }
   return m;
@@ -114,6 +119,40 @@ function migrateV1(v1Model: unknown): CadModel {
     boundaries: v1Model["boundaries"] as CadModel["boundaries"],
     domains: v1Model["domains"] as CadModel["domains"],
     bcs,
+    meshing: [],
+  };
+}
+
+/** v2 → v3: tack on an empty `meshing` array (all lines use defaults). */
+function migrateV2ToV3(model: CadModel): CadModel {
+  if (Array.isArray((model as { meshing?: unknown }).meshing)) return model;
+  return { ...model, meshing: [] };
+}
+
+/**
+ * Parse a v2 model payload and return it shaped as a CadModel (without the
+ * v3-required `meshing` field — added by `migrateV2ToV3`).
+ */
+function extractV2Model(m: unknown): CadModel {
+  if (!isRecord(m)) throw new Error("v2 model is not an object");
+  if (
+    !Array.isArray(m["points"]) ||
+    !Array.isArray(m["lines"]) ||
+    !Array.isArray(m["boundaries"]) ||
+    !Array.isArray(m["domains"]) ||
+    !Array.isArray(m["bcs"])
+  ) {
+    throw new Error(
+      "v2 model is missing required arrays (points, lines, boundaries, domains, bcs)",
+    );
+  }
+  return {
+    points: m["points"] as CadModel["points"],
+    lines: m["lines"] as CadModel["lines"],
+    boundaries: m["boundaries"] as CadModel["boundaries"],
+    domains: m["domains"] as CadModel["domains"],
+    bcs: m["bcs"] as CadModel["bcs"],
+    meshing: [],
   };
 }
 
@@ -152,6 +191,7 @@ function isModelShape(v: unknown): v is CadModel {
     Array.isArray(v["lines"]) &&
     Array.isArray(v["boundaries"]) &&
     Array.isArray(v["domains"]) &&
-    Array.isArray(v["bcs"])
+    Array.isArray(v["bcs"]) &&
+    Array.isArray(v["meshing"])
   );
 }
