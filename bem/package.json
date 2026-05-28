@@ -1,0 +1,21 @@
+{
+  "name": "bem",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "DBE-SBFEM port — interactive 2D BEM/SBFEM for linear elastic fracture mechanics. See thesis/PORT.md.",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "engine",
+    "webapp",
+    "headless"
+  ],
+  "scripts": {
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "dev": "npm run dev --workspace=@bem/webapp"
+  }
+}

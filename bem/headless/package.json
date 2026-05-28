@@ -1,0 +1,19 @@
+{
+  "name": "@bem/headless",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "tsx CLI for batch / convergence runs against @bem/engine.",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "run-analysis": "tsx src/run-analysis.ts"
+  },
+  "dependencies": {
+    "@bem/engine": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3"
+  }
+}

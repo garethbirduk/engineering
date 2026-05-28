@@ -1,0 +1,355 @@
+:root {
+  font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+  color-scheme: light dark;
+  background: canvas;
+  color: canvastext;
+  --accent: #5b8def;
+  --boundary: #c44a4a;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+}
+
+.app {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  height: 100%;
+}
+
+.app-header {
+  display: flex;
+  align-items: baseline;
+  gap: 1rem;
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.app-tag {
+  font-size: 0.8rem;
+  opacity: 0.7;
+}
+
+.cad-layout {
+  display: grid;
+  grid-template-rows: auto 1fr;
+  min-height: 0;
+  height: 100%;
+}
+
+.cad-main {
+  display: grid;
+  grid-template-columns: 1fr 320px;
+  min-height: 0;
+}
+
+.cad-canvas-host {
+  position: relative;
+  display: grid;
+  grid-template-rows: 1fr auto auto;
+  min-height: 0;
+  min-width: 0;
+}
+
+.cad-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.45rem 0.8rem;
+  border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+  background: color-mix(in srgb, var(--accent) 12%, canvas);
+  font-size: 0.85rem;
+}
+
+.cad-banner--ready {
+  background: color-mix(in srgb, var(--accent) 28%, canvas);
+}
+
+.cad-banner-actions {
+  display: inline-flex;
+  gap: 0.4rem;
+}
+
+.cad-banner-btn {
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.25rem 0.7rem;
+  border-radius: 0.3rem;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  background: canvas;
+  color: inherit;
+  cursor: pointer;
+}
+
+.cad-banner-btn:hover:not(:disabled) {
+  background: color-mix(in srgb, currentColor 8%, canvas);
+}
+
+.cad-banner-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.cad-banner-btn--primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.cad-banner-btn--primary:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.cad-toolbar {
+  display: flex;
+  gap: 0.6rem;
+  padding: 0.4rem 0.6rem;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+  background: color-mix(in srgb, canvas 92%, currentColor 8%);
+  flex-wrap: wrap;
+}
+
+.cad-toolgroup {
+  display: inline-flex;
+  gap: 0.25rem;
+}
+
+.cad-toolgroup-sep {
+  width: 1px;
+  background: color-mix(in srgb, currentColor 20%, transparent);
+  margin: 0.1rem 0.25rem;
+}
+
+.cad-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.25rem 0.6rem;
+  font: inherit;
+  font-size: 0.85rem;
+  border: 1px solid color-mix(in srgb, currentColor 20%, transparent);
+  border-radius: 0.35rem;
+  background: canvas;
+  color: inherit;
+  cursor: pointer;
+}
+
+.cad-tool:hover {
+  background: color-mix(in srgb, currentColor 8%, canvas);
+}
+
+.cad-tool--active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+}
+
+.cad-tool--delete.cad-tool--active {
+  background: #c44a4a;
+  border-color: #c44a4a;
+}
+
+.cad-tool--active:hover {
+  filter: brightness(1.05);
+}
+
+.cad-tool kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.7rem;
+  padding: 0 0.3em;
+  border-radius: 0.2em;
+  background: color-mix(in srgb, currentColor 18%, transparent);
+  opacity: 0.85;
+}
+
+.cad-tool--active kbd {
+  background: rgba(255, 255, 255, 0.25);
+  color: white;
+}
+
+.cad-canvas--delete {
+  cursor: not-allowed;
+}
+.cad-canvas--select {
+  cursor: pointer;
+}
+.cad-canvas--create {
+  cursor: crosshair;
+}
+.cad-canvas--grabbing {
+  cursor: grabbing;
+}
+
+/* RHS info panel */
+
+.cad-info {
+  border-left: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+  background: color-mix(in srgb, canvas 96%, currentColor 4%);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.cad-info-header {
+  padding: 0.5rem 0.9rem;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
+}
+
+.cad-info-header h2 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.cad-info-body {
+  padding: 0.6rem 0.9rem;
+  overflow-y: auto;
+  font-size: 0.85rem;
+}
+
+.cad-info-empty {
+  margin: 0;
+  opacity: 0.65;
+  font-style: italic;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.cad-info-dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: minmax(5.5rem, auto) 1fr;
+  column-gap: 0.7rem;
+  row-gap: 0.35rem;
+  align-items: baseline;
+}
+
+.cad-info-dl dt {
+  font-weight: 600;
+  opacity: 0.7;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cad-info-dl dd {
+  margin: 0;
+  word-break: break-all;
+}
+
+.cad-info-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82em;
+  padding: 0.05em 0.3em;
+  border-radius: 0.2em;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+.cad-info-bcs,
+.cad-info-segments {
+  margin: 0;
+  padding-left: 1.2em;
+  display: grid;
+  row-gap: 0.2rem;
+}
+
+.cad-info-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-top: 0.75rem;
+  padding-top: 0.6rem;
+  border-top: 1px dashed color-mix(in srgb, currentColor 18%, transparent);
+}
+
+.cad-info-btn {
+  font: inherit;
+  font-size: 0.82rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: 0.3rem;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  background: canvas;
+  color: inherit;
+  cursor: pointer;
+}
+
+.cad-info-btn:hover {
+  background: color-mix(in srgb, currentColor 8%, canvas);
+}
+
+.cad-picker {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  row-gap: 0.25rem;
+}
+
+.cad-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.35rem 0.5rem;
+  border-radius: 0.3rem;
+  border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+  background: canvas;
+  cursor: pointer;
+  font-size: 0.85rem;
+}
+
+.cad-picker-row:hover {
+  background: color-mix(in srgb, currentColor 5%, canvas);
+}
+
+.cad-picker-row--on {
+  background: color-mix(in srgb, var(--accent) 18%, canvas);
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+}
+
+.cad-picker-name {
+  flex: 1;
+  font-weight: 500;
+}
+
+.cad-picker-meta {
+  opacity: 0.65;
+  font-size: 0.75rem;
+}
+
+.cad-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+  cursor: crosshair;
+  background: color-mix(in srgb, currentColor 3%, transparent);
+  user-select: none;
+  touch-action: none;
+}
+
+.cad-canvas-status {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.75rem;
+  padding: 0.3rem 0.75rem;
+  border-top: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+  opacity: 0.75;
+  white-space: nowrap;
+  overflow-x: auto;
+}
+
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  padding: 0.1em 0.35em;
+  border-radius: 0.25em;
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}

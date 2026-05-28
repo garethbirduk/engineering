@@ -1,0 +1,25 @@
+{
+  "name": "@bem/engine",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "description": "Pure TypeScript BEM/SBFEM library — geometry, kernels, assembly, solver. No DOM, runs in browser and Node.",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./geometry": "./src/geometry/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "ml-matrix": "^6.12.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}

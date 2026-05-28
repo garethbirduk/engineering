@@ -1,0 +1,14 @@
+BE-SBFEM/
+data/
+BIRD_Durham_University_thesis.pdf
+_extract_pdf.py
+_pdf_pages_*.txt
+thesis/
+
+# bem/ workspace build & deps
+bem/node_modules/
+bem/**/node_modules/
+bem/**/dist/
+bem/**/.vite/
+bem/**/coverage/
+bem/**/*.tsbuildinfo
