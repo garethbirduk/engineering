@@ -18,13 +18,19 @@ describe("discretiseLines", () => {
     expect(els[0]!.indexInLine).toBe(0);
     expect(els[0]!.tStart).toBe(0);
     expect(els[0]!.tEnd).toBe(0.5);
-    expect(els[0]!.nodes[0]).toEqual({ x: 1, y: 0 });
-    expect(els[0]!.nodes[1]).toEqual({ x: 3, y: 0 });
-    expect(els[0]!.nodes[2]).toEqual({ x: 5, y: 0 });
+    // Use closeTo (not toEqual) because isoparametric interpolation rounds
+    // in the last bit; values are within 1e-10 of the analytic positions.
+    const expectNode = (n: { x: number; y: number }, x: number, y: number) => {
+      expect(n.x).toBeCloseTo(x, 10);
+      expect(n.y).toBeCloseTo(y, 10);
+    };
+    expectNode(els[0]!.nodes[0]!, 1, 0);
+    expectNode(els[0]!.nodes[1]!, 3, 0);
+    expectNode(els[0]!.nodes[2]!, 5, 0);
 
-    expect(els[1]!.nodes[0]).toEqual({ x: 7, y: 0 });
-    expect(els[1]!.nodes[1]).toEqual({ x: 9, y: 0 });
-    expect(els[1]!.nodes[2]).toEqual({ x: 11, y: 0 });
+    expectNode(els[1]!.nodes[0]!, 7, 0);
+    expectNode(els[1]!.nodes[1]!, 9, 0);
+    expectNode(els[1]!.nodes[2]!, 11, 0);
 
     // Uniform spacing including across element boundary.
     const xs = [
@@ -111,9 +117,8 @@ describe("discretiseLines", () => {
     expect(els[0]!.nodeTs[2]).toBeCloseTo(5 / 12);
   });
 
-  it("arc: nodes sit on the arc, not the chord", () => {
-    // Quarter-circle arc radius √2 from (1, 0) to (0, 1) around (0, 0).
-    // Midpoint of the arc (t = 0.5) should be at (cos 45°, sin 45°).
+  it("arc: nodes are isoparametric — η=0 anchor on the arc, ±2/3 nodes on the quadratic interpolant", () => {
+    // Quarter-circle radius 1 from (1, 0) to (0, 1) around (0, 0).
     const model = {
       points: [
         { id: "p1", x: 1, y: 0 },
@@ -124,16 +129,50 @@ describe("discretiseLines", () => {
     };
     const els = discretiseLines(model);
     expect(els).toHaveLength(2);
-    // Every node must lie on the unit circle of radius 1.
+
+    // The η = 0 output node coincides with the middle anchor, which sits
+    // exactly on the arc at element-local η = 0 → line-t = 0.25.
+    const ang = Math.PI / 8;
+    expect(els[0]!.nodes[1]!.x).toBeCloseTo(Math.cos(ang));
+    expect(els[0]!.nodes[1]!.y).toBeCloseTo(Math.sin(ang));
+
+    // The η = ±2/3 nodes are on the quadratic interpolant through the 3
+    // anchors — close to but not exactly on the true arc. Verify they're
+    // close (within ~1% of the unit-circle radius).
+    for (const el of els) {
+      for (const n of el.nodes) {
+        const r = Math.hypot(n.x, n.y);
+        expect(Math.abs(r - 1)).toBeLessThan(0.01);
+      }
+    }
+
+    // Explicit check: for element 1 at η = -2/3, anchor-shape-function
+    // interpolation yields x ≈ 0.9903, y ≈ 0.1340. The true arc point at
+    // line-t = 1/12 is (cos(π/24), sin(π/24)) ≈ (0.9914, 0.1305) — close
+    // but not identical (this *is* the visible O(h³) approximation error).
+    expect(els[0]!.nodes[0]!.x).toBeCloseTo(0.9903, 3);
+    expect(els[0]!.nodes[0]!.y).toBeCloseTo(0.1340, 3);
+  });
+
+  it("arc with continuous nodes: all 3 nodes per element are exactly on the arc", () => {
+    // When the output nodes coincide with the geometry anchors (η = -1, 0, +1),
+    // shape-function interpolation reproduces them exactly — all nodes on arc.
+    const model = {
+      points: [
+        { id: "p1", x: 1, y: 0 },
+        { id: "p2", x: 0, y: 1 },
+        { id: "c", x: 0, y: 0 },
+      ],
+      lines: [{ id: "l1", startId: "p1", endId: "p2", arcCentreId: "c" }],
+      meshing: [
+        { lineId: "l1", localNodes: [-1, 0, 1] as const },
+      ],
+    };
+    const els = discretiseLines(model);
     for (const el of els) {
       for (const n of el.nodes) {
         expect(Math.hypot(n.x, n.y)).toBeCloseTo(1);
       }
     }
-    // Element 1's η = 0 node sits at t = 0.25 along the arc — that's an
-    // angle of 22.5° from p1.
-    const ang = Math.PI / 8;
-    expect(els[0]!.nodes[1]!.x).toBeCloseTo(Math.cos(ang));
-    expect(els[0]!.nodes[1]!.y).toBeCloseTo(Math.sin(ang));
   });
 });

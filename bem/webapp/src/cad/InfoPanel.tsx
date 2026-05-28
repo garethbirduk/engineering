@@ -5,6 +5,7 @@
 // More than one selected  → summary with counts by kind.
 
 import type { CadModel, DirectionBc, Id, LineDiscretisation } from "@bem/engine";
+import { shapeFunctions } from "@bem/engine";
 import {
   DEFAULT_ELEMENTS_PER_LINE,
   DEFAULT_LOCAL_NODES,
@@ -438,7 +439,153 @@ function MeshingEditor({
           ))}
         </div>
       </div>
+      <ShapeFunctionPlot nodes={localNodes} />
     </div>
+  );
+}
+
+/**
+ * Small SVG preview of the three quadratic shape functions over η ∈ [-1, +1].
+ * Plots y ∈ [-2, +2]. Updates live whenever the user edits the local coords.
+ * The three curves are coloured distinctly; each curve gets Kronecker-delta
+ * markers at every node (1 at its own node, 0 at the others).
+ */
+function ShapeFunctionPlot({
+  nodes,
+}: {
+  nodes: readonly [number, number, number];
+}) {
+  const W = 260;
+  const H = 130;
+  const padL = 22;
+  const padR = 6;
+  const padT = 6;
+  const padB = 18;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+  const xMin = -1;
+  const xMax = 1;
+  const yMin = -2;
+  const yMax = 2;
+  const xPx = (x: number) =>
+    padL + ((x - xMin) / (xMax - xMin)) * innerW;
+  const yPx = (y: number) =>
+    padT + ((yMax - y) / (yMax - yMin)) * innerH;
+
+  const SAMPLES = 81;
+  const xs: number[] = [];
+  for (let i = 0; i < SAMPLES; i++) {
+    xs.push(xMin + (i / (SAMPLES - 1)) * (xMax - xMin));
+  }
+  const curves: [number[], number[], number[]] = [[], [], []];
+  for (const x of xs) {
+    const N = shapeFunctions(x, nodes);
+    curves[0].push(N[0]);
+    curves[1].push(N[1]);
+    curves[2].push(N[2]);
+  }
+
+  const colors = [
+    "var(--accent)",
+    "var(--bc-anchor)",
+    "var(--bc-traction)",
+  ] as const;
+
+  const pathFor = (vals: readonly number[]) =>
+    vals
+      .map((v, i) => `${i === 0 ? "M" : "L"} ${xPx(xs[i]!)} ${yPx(v)}`)
+      .join(" ");
+
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      preserveAspectRatio="xMidYMid meet"
+      className="cad-mesh-plot"
+      aria-label="Shape function preview"
+    >
+      {/* y = 0 axis */}
+      <line
+        x1={padL}
+        y1={yPx(0)}
+        x2={W - padR}
+        y2={yPx(0)}
+        stroke="currentColor"
+        strokeWidth={0.5}
+        opacity={0.4}
+      />
+      {/* y = 1 reference line */}
+      <line
+        x1={padL}
+        y1={yPx(1)}
+        x2={W - padR}
+        y2={yPx(1)}
+        stroke="currentColor"
+        strokeWidth={0.5}
+        opacity={0.15}
+        strokeDasharray="2 2"
+      />
+      {/* x = 0 axis */}
+      <line
+        x1={xPx(0)}
+        y1={padT}
+        x2={xPx(0)}
+        y2={H - padB}
+        stroke="currentColor"
+        strokeWidth={0.5}
+        opacity={0.4}
+      />
+      {/* vertical guides at each node coord */}
+      {nodes.map((n, i) => (
+        <line
+          key={`vg${i}`}
+          x1={xPx(n)}
+          y1={padT}
+          x2={xPx(n)}
+          y2={H - padB}
+          stroke="currentColor"
+          strokeWidth={0.5}
+          opacity={0.18}
+          strokeDasharray="2 2"
+        />
+      ))}
+      {/* 3 shape function curves */}
+      {curves.map((vals, k) => (
+        <path
+          key={`c${k}`}
+          d={pathFor(vals)}
+          fill="none"
+          stroke={colors[k]}
+          strokeWidth={1.4}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      ))}
+      {/* Kronecker-delta markers: N_k(η_j) = δ_kj. For each (k, j), a dot at
+          (η_j, 1) if k===j else (η_j, 0). 9 dots total, coloured by k. */}
+      {nodes.map((_, k) =>
+        nodes.map((etaJ, j) => (
+          <circle
+            key={`m${k}-${j}`}
+            cx={xPx(etaJ)}
+            cy={yPx(k === j ? 1 : 0)}
+            r={2.3}
+            fill={colors[k]}
+            stroke="canvas"
+            strokeWidth={0.5}
+          />
+        )),
+      )}
+      {/* x-axis labels */}
+      <text x={xPx(-1)} y={H - 4} textAnchor="middle" fontSize="8" fill="currentColor" opacity={0.55}>−1</text>
+      <text x={xPx(0)} y={H - 4} textAnchor="middle" fontSize="8" fill="currentColor" opacity={0.55}>0</text>
+      <text x={xPx(1)} y={H - 4} textAnchor="middle" fontSize="8" fill="currentColor" opacity={0.55}>+1</text>
+      {/* y-axis labels */}
+      <text x={padL - 3} y={yPx(0) + 3} textAnchor="end" fontSize="8" fill="currentColor" opacity={0.55}>0</text>
+      <text x={padL - 3} y={yPx(1) + 3} textAnchor="end" fontSize="8" fill="currentColor" opacity={0.55}>1</text>
+      <text x={padL - 3} y={yPx(2) + 3} textAnchor="end" fontSize="8" fill="currentColor" opacity={0.55}>2</text>
+      <text x={padL - 3} y={yPx(-1) + 3} textAnchor="end" fontSize="8" fill="currentColor" opacity={0.55}>−1</text>
+      <text x={padL - 3} y={yPx(-2) + 3} textAnchor="end" fontSize="8" fill="currentColor" opacity={0.55}>−2</text>
+    </svg>
   );
 }
 

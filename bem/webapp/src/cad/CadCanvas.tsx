@@ -1043,30 +1043,46 @@ export function CadCanvas() {
 
                   // Sample positions on the line.
                   //   mesh on  → at the mesh nodes (the discrete BC points
-                  //              the analysis would use). Honours per-line
-                  //              discretisation overrides automatically since
-                  //              we read straight off the derived elements.
-                  //   mesh off → 5 evenly-spaced geometric points
-                  let sampleTs: number[];
+                  //              the analysis would use). Position comes
+                  //              from el.nodes (isoparametric) so the glyph
+                  //              sits exactly where the analysis would put
+                  //              the node — for arcs this is on the quadratic
+                  //              approximation, NOT on the true arc.
+                  //   mesh off → 5 evenly-spaced geometric points on the
+                  //              true line geometry.
+                  let samples: { pos: Vec2 | null; t: number }[];
                   if (meshVisible) {
                     const els2 = elementsByLineId.get(line.id);
                     if (els2 && els2.length > 0) {
-                      sampleTs = els2.flatMap((el) => [...el.nodeTs]);
+                      samples = [];
+                      for (const el of els2) {
+                        for (let k = 0; k < 3; k++) {
+                          samples.push({ pos: el.nodes[k]!, t: el.nodeTs[k]! });
+                        }
+                      }
                     } else {
-                      sampleTs = [0, 0.25, 0.5, 0.75, 1];
+                      samples = [0, 0.25, 0.5, 0.75, 1].map((t) => ({
+                        pos: null,
+                        t,
+                      }));
                     }
                   } else {
-                    sampleTs = [0, 0.25, 0.5, 0.75, 1];
+                    samples = [0, 0.25, 0.5, 0.75, 1].map((t) => ({
+                      pos: null,
+                      t,
+                    }));
                   }
 
-                  for (let i = 0; i < sampleTs.length; i++) {
-                    const t = sampleTs[i]!;
-                    // Sample point + outward normal at that point.
+                  for (let i = 0; i < samples.length; i++) {
+                    const { pos, t } = samples[i]!;
+                    // Position: either the iso node position (mesh on) or
+                    // derived from t on the true geometry (mesh off / no
+                    // element for this line).
                     let p: Vec2;
                     let nx: number;
                     let ny: number;
                     if (centre) {
-                      p = arcPoint(start, end, centre, t);
+                      p = pos ?? arcPoint(start, end, centre, t);
                       // Tangent at p: rotate radius 90° in the travel direction.
                       const rx = p.x - centre.x;
                       const ry = p.y - centre.y;
@@ -1083,7 +1099,7 @@ export function CadCanvas() {
                       nx = tdy;
                       ny = -tdx;
                     } else {
-                      p = {
+                      p = pos ?? {
                         x: start.x + t * (end.x - start.x),
                         y: start.y + t * (end.y - start.y),
                       };
