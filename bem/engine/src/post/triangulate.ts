@@ -301,7 +301,7 @@ function boundaryPolygonFromMesh(
   for (const seg of b.segments) {
     const els = elsByLineId.get(seg.lineId);
     if (!els || els.length === 0) return null;
-    const orderedEls = seg.direction === 1 ? els : [...els].slice().reverse();
+    const orderedEls = seg.direction === 1 ? els : [...els].reverse();
     for (const el of orderedEls) {
       // Traverse the element's 3 nodes in the segment's direction.
       const ns = seg.direction === 1
@@ -309,6 +309,16 @@ function boundaryPolygonFromMesh(
         : [el.nodes[2], el.nodes[1], el.nodes[0]];
       for (const n of ns) addUnique({ x: n.x, y: n.y });
     }
+  }
+  // poly2tri wants an OPEN polyline (it closes implicitly by edge from
+  // last → first). For continuous BEM schemes the last node we just
+  // pushed coincides with the first one — pop it.
+  if (out.length >= 2) {
+    const first = out[0]!;
+    const last = out[out.length - 1]!;
+    const dx = first.x - last.x;
+    const dy = first.y - last.y;
+    if (dx * dx + dy * dy < POS_EPS * POS_EPS) out.pop();
   }
   return out;
 }
