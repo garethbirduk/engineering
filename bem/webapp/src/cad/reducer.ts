@@ -87,8 +87,22 @@ export interface CanvasState {
   readonly internalNodesVisible: boolean;
   /** Which interior field is contoured on the triangulation, or null
    *  if no contour is shown. Each entry in the Results panel maps to
-   *  one of these. Add fields here as stresses come online. */
-  readonly interiorField: "ux" | "uy" | null;
+   *  one of these.
+   *  - Displacement: ux, uy
+   *  - Cartesian stress: sxx, syy, sxy
+   *  - Derived stress scalars: svm (von Mises), s1, s2 (principals),
+   *    tmax (max in-plane shear) */
+  readonly interiorField:
+    | "ux"
+    | "uy"
+    | "sxx"
+    | "syy"
+    | "sxy"
+    | "svm"
+    | "s1"
+    | "s2"
+    | "tmax"
+    | null;
 }
 
 /** Geometric parameters needed to interpret a click/double-click. */
@@ -153,7 +167,7 @@ export type CanvasAction =
   | { readonly type: "toggleInternalNodes" }
   | {
       readonly type: "setInteriorField";
-      readonly field: "ux" | "uy" | null;
+      readonly field: CanvasState["interiorField"];
     };
 
 export const INITIAL_STATE: CanvasState = {

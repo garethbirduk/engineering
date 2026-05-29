@@ -32,12 +32,14 @@ import {
   DEFAULT_MATERIAL,
   discretiseLines,
   interiorDisplacement,
+  interiorStress,
   loopOrientation,
   shapeFunctions,
   shapeFunctionDerivatives,
   solve,
   STANDARD_NODES,
   type MeshElement,
+  type StressTriple,
   type Vec2,
 } from "@bem/engine";
 import { Toolbar } from "./Toolbar.js";
@@ -465,11 +467,47 @@ export function CadCanvas() {
     return { points: pts, triangles: tris };
   }, [meshElements, model.points, internalNodes, boundaryPolygons]);
 
+  /** True when the active field needs the full Cartesian stress tensor
+   *  at every vertex (cheap algebra on top derives σvm, σ1, σ2, τmax). */
+  const stressActive =
+    interiorField === "sxx" ||
+    interiorField === "syy" ||
+    interiorField === "sxy" ||
+    interiorField === "svm" ||
+    interiorField === "s1" ||
+    interiorField === "s2" ||
+    interiorField === "tmax";
+
+  /** Per-vertex Cartesian stress, lazily evaluated. We only pay the
+   *  per-point Somigliana stress integral when a stress-derived field
+   *  is selected; switching between σxx/σyy/τxy/σvm/σ1/σ2/τmax reuses
+   *  this memo. Boundary-adjacent vertices (BEM nodes / corner Points)
+   *  go through the same evaluator — D* / S* are near-singular there, so
+   *  those values are inaccurate. Acceptable for v1; future work: a
+   *  proper boundary-stress recovery from local tangential strain. */
+  const interiorStresses: readonly StressTriple[] | null = useMemo(() => {
+    if (!stressActive || !internalTriangles || solvedMesh.length === 0) {
+      return null;
+    }
+    const out: StressTriple[] = new Array(internalTriangles.points.length);
+    for (let i = 0; i < internalTriangles.points.length; i++) {
+      out[i] = interiorStress(
+        internalTriangles.points[i]!,
+        solvedMesh,
+        DEFAULT_MATERIAL,
+      );
+    }
+    return out;
+  }, [stressActive, internalTriangles, solvedMesh]);
+
   /** Active interior field values at every triangulation vertex.
-   *  BEM-node coincident points use the solved nodal DOF directly; the
-   *  rest go through Somigliana via `interiorDisplacement` against the
-   *  solved boundary. Returns null when no field is selected, no
-   *  triangulation exists, or the solver hasn't produced output. */
+   *  Displacement fields: BEM-node coincident points use the solved
+   *  nodal DOF directly; the rest go through Somigliana via
+   *  `interiorDisplacement`. Stress fields: per-vertex stress tensor
+   *  is read from `interiorStresses`, then the requested component or
+   *  derived scalar is computed inline. Returns null when no field is
+   *  selected, no triangulation exists, or the solver hasn't produced
+   *  output. */
   const interiorFieldValues: readonly number[] | null = useMemo(() => {
     if (
       !internalTriangles ||
@@ -478,34 +516,89 @@ export function CadCanvas() {
     ) {
       return null;
     }
-    const POS_EPS = 1e-6;
-    const ptKey = (x: number, y: number) =>
-      `${Math.round(x / POS_EPS)}|${Math.round(y / POS_EPS)}`;
-    const pickNode = (n: { ux: number; uy: number }) =>
-      interiorField === "ux" ? n.ux : n.uy;
-    const pickInterior = (u: Vec2) =>
-      interiorField === "ux" ? u.x : u.y;
-    const bemByKey = new Map<string, number>();
-    for (const el of solvedMesh) {
-      for (const n of el.nodes) {
-        const v = pickNode(n);
-        if (Number.isFinite(v)) bemByKey.set(ptKey(n.x, n.y), v);
+    const N = internalTriangles.points.length;
+
+    if (interiorField === "ux" || interiorField === "uy") {
+      const POS_EPS = 1e-6;
+      const ptKey = (x: number, y: number) =>
+        `${Math.round(x / POS_EPS)}|${Math.round(y / POS_EPS)}`;
+      const pickNode = (n: { ux: number; uy: number }) =>
+        interiorField === "ux" ? n.ux : n.uy;
+      const pickInterior = (u: Vec2) =>
+        interiorField === "ux" ? u.x : u.y;
+      const bemByKey = new Map<string, number>();
+      for (const el of solvedMesh) {
+        for (const n of el.nodes) {
+          const v = pickNode(n);
+          if (Number.isFinite(v)) bemByKey.set(ptKey(n.x, n.y), v);
+        }
       }
+      const out: number[] = new Array(N);
+      for (let i = 0; i < N; i++) {
+        const p = internalTriangles.points[i]!;
+        const known = bemByKey.get(ptKey(p.x, p.y));
+        if (known !== undefined) {
+          out[i] = known;
+        } else {
+          out[i] = pickInterior(
+            interiorDisplacement(p, solvedMesh, DEFAULT_MATERIAL),
+          );
+        }
+      }
+      return out;
     }
-    const out: number[] = new Array(internalTriangles.points.length);
-    for (let i = 0; i < internalTriangles.points.length; i++) {
-      const p = internalTriangles.points[i]!;
-      const known = bemByKey.get(ptKey(p.x, p.y));
-      if (known !== undefined) {
-        out[i] = known;
-      } else {
-        out[i] = pickInterior(
-          interiorDisplacement(p, solvedMesh, DEFAULT_MATERIAL),
-        );
+
+    if (!interiorStresses) return null;
+
+    // Plane-strain out-of-plane stress used by the von Mises formula —
+    // zero for plane-stress, ν(σxx+σyy) for plane-strain.
+    const planeStrain = DEFAULT_MATERIAL.planeKind === "strain";
+    const nu = DEFAULT_MATERIAL.nu;
+    const out: number[] = new Array(N);
+    for (let i = 0; i < N; i++) {
+      const { sxx, syy, sxy } = interiorStresses[i]!;
+      let v: number;
+      switch (interiorField) {
+        case "sxx":
+          v = sxx;
+          break;
+        case "syy":
+          v = syy;
+          break;
+        case "sxy":
+          v = sxy;
+          break;
+        case "tmax":
+          v = Math.hypot((sxx - syy) / 2, sxy);
+          break;
+        case "s1": {
+          const m = (sxx + syy) / 2;
+          v = m + Math.hypot((sxx - syy) / 2, sxy);
+          break;
+        }
+        case "s2": {
+          const m = (sxx + syy) / 2;
+          v = m - Math.hypot((sxx - syy) / 2, sxy);
+          break;
+        }
+        case "svm": {
+          const szz = planeStrain ? nu * (sxx + syy) : 0;
+          v = Math.sqrt(
+            0.5 *
+              ((sxx - syy) ** 2 +
+                (syy - szz) ** 2 +
+                (szz - sxx) ** 2 +
+                6 * sxy * sxy),
+          );
+          break;
+        }
+        default:
+          v = NaN;
       }
+      out[i] = Number.isFinite(v) ? v : 0;
     }
     return out;
-  }, [internalTriangles, solvedMesh, interiorField]);
+  }, [internalTriangles, solvedMesh, interiorField, interiorStresses]);
 
   /** Actual min, max + symmetric range (max |v|) of the active field. */
   const interiorFieldStats: FieldStats | null = useMemo(() => {

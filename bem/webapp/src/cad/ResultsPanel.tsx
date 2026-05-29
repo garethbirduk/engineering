@@ -4,12 +4,23 @@
 // the contour fills colour by, and shows a legend bar with the symmetric
 // diverging scale plus the actual data range.
 //
-// Field list is extensible: ux, uy today; σxx, σyy, τxy once stresses
-// are wired up.
+// Fields are grouped: displacement (ux, uy) — primary BEM solve output;
+// Cartesian stress (σxx, σyy, τxy) — from the stress Somigliana identity
+// at every triangulation vertex; derived stress scalars (σvm, σ1, σ2,
+// τmax) — algebra on the Cartesian components, evaluated per vertex.
 
 import { divergingGradientCss, divergingUxColor } from "./colorScale.js";
 
-export type InteriorField = "ux" | "uy";
+export type InteriorField =
+  | "ux"
+  | "uy"
+  | "sxx"
+  | "syy"
+  | "sxy"
+  | "svm"
+  | "s1"
+  | "s2"
+  | "tmax";
 
 export interface FieldStats {
   /** Actual minimum value across the triangulation. */
@@ -24,12 +35,38 @@ interface FieldOption {
   readonly id: InteriorField;
   readonly label: string;
   readonly tooltip: string;
-  readonly disabled?: boolean;
 }
 
-const FIELDS: readonly FieldOption[] = [
-  { id: "ux", label: "ux", tooltip: "x-displacement" },
-  { id: "uy", label: "uy", tooltip: "y-displacement" },
+interface FieldGroup {
+  readonly title: string;
+  readonly fields: readonly FieldOption[];
+}
+
+const GROUPS: readonly FieldGroup[] = [
+  {
+    title: "Displacement",
+    fields: [
+      { id: "ux", label: "ux", tooltip: "x-displacement" },
+      { id: "uy", label: "uy", tooltip: "y-displacement" },
+    ],
+  },
+  {
+    title: "Cartesian stress",
+    fields: [
+      { id: "sxx", label: "σxx", tooltip: "Normal stress σ_xx" },
+      { id: "syy", label: "σyy", tooltip: "Normal stress σ_yy" },
+      { id: "sxy", label: "τxy", tooltip: "Shear stress σ_xy = τ_xy" },
+    ],
+  },
+  {
+    title: "Derived stress",
+    fields: [
+      { id: "svm", label: "σvm", tooltip: "von Mises equivalent stress" },
+      { id: "s1", label: "σ1", tooltip: "Major principal stress" },
+      { id: "s2", label: "σ2", tooltip: "Minor principal stress" },
+      { id: "tmax", label: "τmax", tooltip: "Max in-plane shear" },
+    ],
+  },
 ];
 
 interface ResultsPanelProps {
@@ -56,39 +93,51 @@ export function ResultsPanel({
   canShowResults,
   onSelectField,
 }: ResultsPanelProps) {
+  const activeLabel = (() => {
+    for (const g of GROUPS) {
+      for (const f of g.fields) if (f.id === activeField) return f.label;
+    }
+    return "";
+  })();
   return (
     <div className="results-panel">
       <h3 className="results-panel-title">Results</h3>
 
-      <div className="results-section">
-        <div className="results-section-label">Interior field</div>
-        <div className="results-buttons" role="group" aria-label="Interior field">
-          {FIELDS.map((f) => {
-            const isActive = activeField === f.id;
-            return (
-              <button
-                key={f.id}
-                type="button"
-                className={`results-btn ${isActive ? "results-btn--active" : ""}`}
-                aria-pressed={isActive}
-                disabled={!canShowResults || f.disabled}
-                title={
-                  canShowResults
-                    ? `${f.tooltip} (click to toggle)`
-                    : "Add geometry + boundary conditions to enable"
-                }
-                onClick={() => onSelectField(isActive ? null : f.id)}
-              >
-                {f.label}
-              </button>
-            );
-          })}
+      {GROUPS.map((group) => (
+        <div className="results-section" key={group.title}>
+          <div className="results-section-label">{group.title}</div>
+          <div
+            className="results-buttons"
+            role="group"
+            aria-label={group.title}
+          >
+            {group.fields.map((f) => {
+              const isActive = activeField === f.id;
+              return (
+                <button
+                  key={f.id}
+                  type="button"
+                  className={`results-btn ${isActive ? "results-btn--active" : ""}`}
+                  aria-pressed={isActive}
+                  disabled={!canShowResults}
+                  title={
+                    canShowResults
+                      ? `${f.tooltip} (click to toggle)`
+                      : "Add geometry + boundary conditions to enable"
+                  }
+                  onClick={() => onSelectField(isActive ? null : f.id)}
+                >
+                  {f.label}
+                </button>
+              );
+            })}
+          </div>
         </div>
-      </div>
+      ))}
 
       <div className="results-section">
         <div className="results-section-label">
-          Scale {activeField ? `(${activeField})` : ""}
+          Scale {activeField ? `(${activeLabel})` : ""}
         </div>
         {activeField && stats ? (
           <ScaleLegend stats={stats} />
@@ -99,11 +148,6 @@ export function ResultsPanel({
               : "No results yet — set boundary conditions and let the solver run."}
           </div>
         )}
-      </div>
-
-      <div className="results-footer-hint">
-        Stress fields will appear here once the stress recovery step is
-        wired up.
       </div>
     </div>
   );
@@ -128,11 +172,17 @@ function ScaleLegend({ stats }: { readonly stats: FieldStats }) {
       </div>
       <div className="results-scale-meta">
         <div>
-          <span className="results-scale-swatch" style={{ background: divergingUxColor(1) }} />
+          <span
+            className="results-scale-swatch"
+            style={{ background: divergingUxColor(1) }}
+          />
           data max: <strong>{fmtSci(stats.max)}</strong>
         </div>
         <div>
-          <span className="results-scale-swatch" style={{ background: divergingUxColor(-1) }} />
+          <span
+            className="results-scale-swatch"
+            style={{ background: divergingUxColor(-1) }}
+          />
           data min: <strong>{fmtSci(stats.min)}</strong>
         </div>
       </div>
