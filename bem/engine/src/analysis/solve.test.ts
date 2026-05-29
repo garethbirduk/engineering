@@ -204,4 +204,194 @@ describe("solve (BEM)", () => {
     const meanUyTop = topNodes.reduce((a, b) => a + b, 0) / topNodes.length;
     expect(meanUyTop).toBeCloseTo(-6e-4, 5);
   });
+
+  it("corner BC merge — continuous scheme picks the non-zero traction at every corner of a biaxial plate", async () => {
+    // Reproduces the plate-no-hole biaxial setup from
+    // examples/plate no hole.json:
+    //   left dx = 0
+    //   bottom dy = 0
+    //   right tx = 100 GPa
+    //   top ty = 100 GPa
+    // Continuous scheme (η = -1, 0, +1) on every line means every plate
+    // corner is one shared collocation node. The merge has to keep the
+    // applied load at each corner, not the "default-free zero" from the
+    // adjacent face. This test asserts the MERGED nodal BCs directly via
+    // assembleHG.
+    //
+    // Note: continuous scheme still has an inherent corner-traction-
+    // discontinuity error in the final solve (both adjacent edge
+    // integrations see the same nodal tractions, even though physically
+    // they should see different vectors). The convergence test below
+    // shows the discontinuous scheme — the recommended fix — converging
+    // to the analytical answer.
+    const { assembleHG } = await import("./assemble.js");
+    const model = {
+      points: [
+        { id: "A", x: 0, y: 0 },
+        { id: "B", x: 0, y: 8 },
+        { id: "C", x: 8, y: 8 },
+        { id: "D", x: 8, y: 0 },
+      ],
+      lines: [
+        { id: "lL", startId: "B", endId: "A" }, // left, B→A
+        { id: "lT", startId: "C", endId: "B" }, // top, C→B
+        { id: "lR", startId: "D", endId: "C" }, // right, D→C
+        { id: "lB", startId: "A", endId: "D" }, // bottom, A→D
+      ],
+      bcs: [
+        { lineId: "lL", x: { kind: "displacement" as const, value: 0 } },
+        { lineId: "lB", y: { kind: "displacement" as const, value: 0 } },
+        {
+          lineId: "lR",
+          x: { kind: "traction" as const, value: 100, prefix: 9 },
+        },
+        {
+          lineId: "lT",
+          y: { kind: "traction" as const, value: 100, prefix: 9 },
+        },
+      ],
+      meshing: [
+        {
+          lineId: "lL",
+          elementsPerLine: 1,
+          localNodes: [-1, 0, 1] as [number, number, number],
+        },
+        {
+          lineId: "lT",
+          elementsPerLine: 1,
+          localNodes: [-1, 0, 1] as [number, number, number],
+        },
+        {
+          lineId: "lR",
+          elementsPerLine: 1,
+          localNodes: [-1, 0, 1] as [number, number, number],
+        },
+        {
+          lineId: "lB",
+          elementsPerLine: 1,
+          localNodes: [-1, 0, 1] as [number, number, number],
+        },
+      ],
+    };
+    const mesh = discretiseLines(model);
+    const sys = assembleHG(mesh, {
+      E: 207e9,
+      nu: 0.3,
+      planeKind: "stress",
+    });
+
+    const findCorner = (x: number, y: number) => {
+      for (const n of sys.nodesByIndex) {
+        if (Math.abs(n.x - x) < 1e-6 && Math.abs(n.y - y) < 1e-6) return n;
+      }
+      throw new Error(`corner (${x}, ${y}) not found`);
+    };
+
+    const A = findCorner(0, 0); // bottom-left, both anchored
+    const B = findCorner(0, 8); // top-left, left dx=0 + top ty=100
+    const C = findCorner(8, 8); // top-right, right tx=100 + top ty=100
+    const D = findCorner(8, 0); // bottom-right, right tx=100 + bottom dy=0
+
+    // A: dx=0 from left + dy=0 from bottom; both tractions become reactions.
+    expect(A.ux).toBe(0);
+    expect(A.uy).toBe(0);
+    expect(Number.isNaN(A.tx)).toBe(true);
+    expect(Number.isNaN(A.ty)).toBe(true);
+
+    // B: left's dx=0 wins for x; top's ty=100 GPa wins over left's default ty=0.
+    expect(B.ux).toBe(0);
+    expect(Number.isNaN(B.uy)).toBe(true);
+    expect(Number.isNaN(B.tx)).toBe(true); // dropped (displacement-wins cleanup)
+    expect(B.ty).toBeCloseTo(100e9, -7);
+
+    // C: right's tx=100 GPa wins over top's default tx=0; top's ty=100 GPa
+    // wins over right's default ty=0.
+    expect(Number.isNaN(C.ux)).toBe(true);
+    expect(Number.isNaN(C.uy)).toBe(true);
+    expect(C.tx).toBeCloseTo(100e9, -7);
+    expect(C.ty).toBeCloseTo(100e9, -7);
+
+    // D: right's tx=100 GPa wins over bottom's default tx=0; bottom's dy=0
+    // wins over right's default ty=0 (displacement-wins).
+    expect(Number.isNaN(D.ux)).toBe(true);
+    expect(D.uy).toBe(0);
+    expect(D.tx).toBeCloseTo(100e9, -7);
+    expect(Number.isNaN(D.ty)).toBe(true);
+  });
+
+  it("biaxial tension on an 8×8 plate, discontinuous scheme — analytical match", () => {
+    // Same plate / loading as the merge test above, but with the
+    // discontinuous scheme (the engine default, η = ±2/3, 0). Corners
+    // are no longer collocation points so the corner-traction
+    // discontinuity is sidestepped naturally and BEM converges cleanly
+    // to the analytical answer.
+    //
+    // Plane stress, E = 207 GPa, ν = 0.3. Analytical biaxial:
+    //   ε_xx = (σ_xx − ν σ_yy) / E = (100 − 30) / 207 GPa
+    //   u_x at right (x=8) = ε_xx · 8 = 560/207 ≈ 2.7053
+    //   u_y at top (y=8)  = same by symmetry
+    const model = {
+      points: [
+        { id: "A", x: 0, y: 0 },
+        { id: "B", x: 0, y: 8 },
+        { id: "C", x: 8, y: 8 },
+        { id: "D", x: 8, y: 0 },
+      ],
+      lines: [
+        { id: "lL", startId: "B", endId: "A" }, // left, B→A
+        { id: "lT", startId: "C", endId: "B" }, // top, C→B
+        { id: "lR", startId: "D", endId: "C" }, // right, D→C
+        { id: "lB", startId: "A", endId: "D" }, // bottom, A→D
+      ],
+      bcs: [
+        { lineId: "lL", x: { kind: "displacement" as const, value: 0 } },
+        { lineId: "lB", y: { kind: "displacement" as const, value: 0 } },
+        {
+          lineId: "lR",
+          x: { kind: "traction" as const, value: 100, prefix: 9 },
+        },
+        {
+          lineId: "lT",
+          y: { kind: "traction" as const, value: 100, prefix: 9 },
+        },
+      ],
+      meshing: [
+        { lineId: "lL", elementsPerLine: 4 },
+        { lineId: "lT", elementsPerLine: 4 },
+        { lineId: "lR", elementsPerLine: 4 },
+        { lineId: "lB", elementsPerLine: 4 },
+      ],
+    };
+    const mesh = discretiseLines(model);
+    const solved = solve(mesh, { E: 207e9, nu: 0.3, planeKind: "stress" });
+
+    const expectedU = (8 * 70) / 207; // ≈ 2.7053
+
+    // Pull the right-edge ux values — should all be ≈ expectedU, with
+    // a tight range across the edge.
+    const rightUx: number[] = [];
+    for (const el of solved) {
+      if (el.lineId !== "lR") continue;
+      for (const n of el.nodes) {
+        if (Math.abs(n.x - 8) < 1e-6) rightUx.push(n.ux);
+      }
+    }
+    expect(rightUx.length).toBeGreaterThan(0);
+    for (const ux of rightUx) {
+      expect(ux).toBeCloseTo(expectedU, 2);
+    }
+
+    // Same check on the top edge — uy should be uniform ≈ expectedU.
+    const topUy: number[] = [];
+    for (const el of solved) {
+      if (el.lineId !== "lT") continue;
+      for (const n of el.nodes) {
+        if (Math.abs(n.y - 8) < 1e-6) topUy.push(n.uy);
+      }
+    }
+    expect(topUy.length).toBeGreaterThan(0);
+    for (const uy of topUy) {
+      expect(uy).toBeCloseTo(expectedU, 2);
+    }
+  });
 });

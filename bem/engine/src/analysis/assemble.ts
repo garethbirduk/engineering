@@ -45,30 +45,37 @@ function posKey(n: MeshNode): string {
  * Merge a coincident node's DOFs into an existing representative. Each
  * line that meets at a shared (continuous) corner contributes its own
  * BC fan-out; without merging we'd silently drop the second visitor's
- * constraints (e.g. bottom edge says uy=0 and right edge says tx=100 —
- * both must reach the corner).
+ * constraints.
  *
- * Rule per DOF:
- *   • NaN ∪ known  → known
- *   • known ∪ known with equal values (within tolerance) → keep
- *   • known ∪ known with different values → take A's value, warn.
- *     Real-world cause: applied traction differs on the two faces of a
- *     corner (genuine physics — properly resolved by double-collocation
- *     at corners; we don't do that yet).
+ * Per-axis rules (independent x and y), applied in two layers:
  *
- * After the per-DOF merge, per-AXIS cleanup: if both u and t for the
- * same axis end up known (e.g. bottom uy=0 + right ty=0 at a corner),
- * keep displacement, drop traction. The solver requires exactly one
- * known per axis; the dropped t becomes the corner reaction the solver
- * computes.
+ * Within-kind merge (`mergeDof`):
+ *   - NaN ∪ known → known.
+ *   - Equal values → keep.
+ *   - Two displacements disagree → user error. Warn and take the
+ *     smaller-|·| (zero, if present, is almost always the anchor the
+ *     user intended).
+ *   - Two tractions where one is zero → take the non-zero. The zero
+ *     side is almost always the "default free" the fan-out filled in
+ *     for an unspecified axis; the non-zero side is the explicit
+ *     applied load the user typed in.
+ *   - Two non-zero tractions that disagree → genuine corner-traction
+ *     discontinuity (different outward normals on the two faces). A
+ *     single nodal DOF can't represent it. Warn loudly and take the
+ *     larger magnitude so the solve still runs. Proper fix: switch
+ *     the two adjacent lines to the discontinuous mesh scheme so the
+ *     corner is no longer a collocation point.
+ *
+ * Per-axis cleanup: if both u and t end up known for the same axis,
+ * displacement wins (it's physically continuous; the traction would
+ * have been absorbed as a reaction at the pinned point anyway). The
+ * dropped t becomes the corner reaction the solver computes.
  */
 function mergeNodes(a: MeshNode, b: MeshNode): MeshNode {
   let ux = mergeDof(a.ux, b.ux, "u");
   let uy = mergeDof(a.uy, b.uy, "u");
   let tx = mergeDof(a.tx, b.tx, "t");
   let ty = mergeDof(a.ty, b.ty, "t");
-  // Per-axis cleanup — if both u and t known for an axis, displacement
-  // wins and the traction becomes a solve-time unknown (reaction).
   if (!Number.isNaN(ux) && !Number.isNaN(tx)) tx = NaN;
   if (!Number.isNaN(uy) && !Number.isNaN(ty)) ty = NaN;
   return { x: a.x, y: a.y, ux, uy, tx, ty };
@@ -77,16 +84,35 @@ function mergeNodes(a: MeshNode, b: MeshNode): MeshNode {
 function mergeDof(a: number, b: number, kind: "u" | "t"): number {
   if (Number.isNaN(a)) return b;
   if (Number.isNaN(b)) return a;
-  if (Math.abs(a - b) < 1e-9 * Math.max(1, Math.abs(a), Math.abs(b))) return a;
-  // Conflict: two different known values at the same position. For
-  // traction this is genuine (different surface normals on the two
-  // faces of a corner). For displacement it's user error. Either way
-  // we proceed with A's value and emit a warning.
+  // Both known.
+  if (Math.abs(a - b) < 1e-9 * Math.max(1, Math.abs(a), Math.abs(b))) {
+    return a;
+  }
+  if (kind === "t") {
+    // Default-free (zero) loses to an explicit applied load. Covers
+    // uniaxial / biaxial / any-face-loaded-with-adjacent-free.
+    if (a === 0) return b;
+    if (b === 0) return a;
+    // Both non-zero — genuine corner-traction discontinuity. Single
+    // nodal DOF can't represent it; pick the larger magnitude so the
+    // solve at least proceeds, and tell the user how to resolve it.
+    const pick = Math.abs(a) >= Math.abs(b) ? a : b;
+    // eslint-disable-next-line no-console
+    console.warn(
+      `BEM: corner-traction discontinuity — got ${a} and ${b}, using ${pick}. ` +
+        `Switch the two adjacent lines to the discontinuous mesh scheme to resolve.`,
+    );
+    return pick;
+  }
+  // Two displacements disagree — user error. Smaller-|·| wins (an
+  // anchor is almost always what was meant).
+  const pick = Math.abs(a) <= Math.abs(b) ? a : b;
   // eslint-disable-next-line no-console
   console.warn(
-    `BEM: ${kind} conflict at merged corner — got ${a} and ${b}, using ${a}`,
+    `BEM: corner-displacement conflict — got ${a} and ${b}, using ${pick}. ` +
+      `Two adjacent lines impose different displacements at this corner.`,
   );
-  return a;
+  return pick;
 }
 
 /**
