@@ -51,8 +51,20 @@ body,
 
 .cad-main {
   display: grid;
-  grid-template-columns: 1fr 320px;
+  /* grid-template-columns set inline by React so the user can drag the
+     vertical resizer to widen the Inspector. */
   min-height: 0;
+}
+
+.cad-resizer {
+  background: color-mix(in srgb, currentColor 10%, transparent);
+  cursor: col-resize;
+  user-select: none;
+  transition: background 0.12s;
+}
+
+.cad-resizer:hover {
+  background: color-mix(in srgb, var(--accent) 50%, transparent);
 }
 
 .cad-canvas-host {
@@ -418,6 +430,27 @@ body,
   border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
   border-radius: 0.25rem;
   background: color-mix(in srgb, canvas 96%, currentColor 4%);
+}
+
+.cad-mesh-presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
+}
+
+.cad-mesh-preset {
+  font: inherit;
+  font-size: 0.78rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 0.25rem;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  background: canvas;
+  color: inherit;
+  cursor: pointer;
+}
+
+.cad-mesh-preset:hover {
+  background: color-mix(in srgb, currentColor 8%, canvas);
 }
 
 .cad-picker {

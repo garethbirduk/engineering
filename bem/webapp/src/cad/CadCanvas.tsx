@@ -152,6 +152,7 @@ export function CadCanvas() {
   const [state, dispatch] = useReducer(canvasReducer, INITIAL_STATE);
   const [cursorWorld, setCursorWorld] = useState<Vec2 | null>(null);
   const [snap, setSnap] = useState<ReturnType<typeof snapWorld> | null>(null);
+  const [rhsWidth, setRhsWidth] = useState(320);
 
   const { model, selection, dragSession, newLineDraft, meshVisible } = state;
 
@@ -628,6 +629,28 @@ export function CadCanvas() {
     if (loaded) dispatch({ type: "loadModel", model: loaded });
   }, []);
 
+  const onResizerDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startWidth = rhsWidth;
+      const onMove = (ev: MouseEvent) => {
+        const dx = ev.clientX - startX;
+        // Dragging LEFT widens the panel (canvas shrinks); dragging RIGHT
+        // narrows it. Clamp to [280, 900] px.
+        const next = Math.max(280, Math.min(900, startWidth - dx));
+        setRhsWidth(next);
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    },
+    [rhsWidth],
+  );
+
   const handleNew = useCallback(() => {
     const hasContent =
       model.points.length > 0 ||
@@ -757,7 +780,12 @@ export function CadCanvas() {
         onLoad={handleLoad}
         onNew={handleNew}
       />
-      <div className="cad-main">
+      <div
+        className="cad-main"
+        style={{
+          gridTemplateColumns: `minmax(0, 1fr) 6px ${rhsWidth}px`,
+        }}
+      >
         <div className="cad-canvas-host">
           <svg
             ref={svgRef}
@@ -1316,6 +1344,13 @@ export function CadCanvas() {
           </svg>
           <div className="cad-canvas-status">{statusBits.join("  ·  ")}</div>
         </div>
+        <div
+          className="cad-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          onMouseDown={onResizerDown}
+          title="Drag to resize the Inspector panel"
+        />
         <InfoPanel
           model={model}
           selection={selection}

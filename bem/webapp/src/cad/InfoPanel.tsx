@@ -4,6 +4,7 @@
 // One item selected       → full inspector for that item.
 // More than one selected  → summary with counts by kind.
 
+import { useEffect, useRef, useState } from "react";
 import type { CadModel, DirectionBc, Id, LineDiscretisation } from "@bem/engine";
 import { shapeFunctions } from "@bem/engine";
 import {
@@ -347,6 +348,71 @@ function DomainInfo({
 
 // ── Meshing editor ───────────────────────────────────────────────────────
 
+const NODE_PRESETS: readonly {
+  readonly label: string;
+  readonly values: readonly [number, number, number];
+}[] = [
+  { label: "Continuous", values: [-1, 0, 1] },
+  { label: "Uniform", values: [-2 / 3, 0, 2 / 3] },
+];
+
+/**
+ * Snap targets a dragged handle can settle on. Every 1/10 in [-1, +1] plus
+ * the canonical irrationals (±1/3, ±2/3) and the half-quarter splits
+ * (±0.25, ±0.75) that don't fall on the 1/10 grid.
+ */
+const SNAP_TARGETS: readonly number[] = (() => {
+  const s = new Set<number>();
+  for (let i = -10; i <= 10; i++) s.add(i / 10);
+  for (const v of [
+    0.25, -0.25,
+    0.75, -0.75,
+    1 / 3, -1 / 3,
+    2 / 3, -2 / 3,
+    5 / 6, -5 / 6,
+  ]) {
+    s.add(v);
+  }
+  return [...s].sort((a, b) => a - b);
+})();
+
+/** Tiny epsilon so adjacent handles can't sit on top of each other. */
+const ORDER_EPS = 1e-6;
+
+/**
+ * Move node `k` toward `targetEta`, clamped to [-1, +1] and strictly inside
+ * its neighbours, then snapped to the nearest valid snap target. Returns the
+ * updated triple. If the neighbours are too close to leave any room, returns
+ * the original.
+ */
+function dragNode(
+  nodes: readonly [number, number, number],
+  k: 0 | 1 | 2,
+  targetEta: number,
+): readonly [number, number, number] {
+  let lo = -1;
+  let hi = 1;
+  if (k > 0) lo = nodes[k - 1]! + ORDER_EPS;
+  if (k < 2) hi = nodes[k + 1]! - ORDER_EPS;
+  if (lo > hi) return nodes;
+  const clamped = Math.max(lo, Math.min(hi, targetEta));
+  let best = clamped;
+  let bestDist = Infinity;
+  for (const t of SNAP_TARGETS) {
+    if (t < lo || t > hi) continue;
+    const d = Math.abs(t - clamped);
+    if (d < bestDist) {
+      bestDist = d;
+      best = t;
+    }
+  }
+  if (best === nodes[k]) return nodes;
+  const next: [number, number, number] = [nodes[0]!, nodes[1]!, nodes[2]!];
+  next[k] = best;
+  return next;
+}
+
+
 function MeshingEditor({
   meshing,
   onChange,
@@ -373,6 +439,26 @@ function MeshingEditor({
     });
   };
 
+  // Single helper for any localNodes change (typed input, preset chip,
+  // dragged handle). If the new values match the defaults exactly we drop
+  // the override so the model stays sparse.
+  const setLocalNodes = (values: readonly [number, number, number]) => {
+    const isDefaultLocal =
+      values[0] === DEFAULT_LOCAL_NODES[0] &&
+      values[1] === DEFAULT_LOCAL_NODES[1] &&
+      values[2] === DEFAULT_LOCAL_NODES[2];
+    onChange({
+      ...(meshing?.elementsPerLine !== undefined
+        ? { elementsPerLine: meshing.elementsPerLine }
+        : {}),
+      ...(isDefaultLocal ? {} : { localNodes: values }),
+    });
+  };
+
+  const setPreset = (values: readonly [number, number, number]) => {
+    setLocalNodes(values);
+  };
+
   const setLocal = (idx: 0 | 1 | 2, v: number) => {
     if (!Number.isFinite(v)) return;
     const next: [number, number, number] = [
@@ -381,17 +467,7 @@ function MeshingEditor({
       localNodes[2]!,
     ];
     next[idx] = v;
-    // If the user happens to type the defaults back in, clear the override.
-    const isDefaultLocal =
-      next[0] === DEFAULT_LOCAL_NODES[0] &&
-      next[1] === DEFAULT_LOCAL_NODES[1] &&
-      next[2] === DEFAULT_LOCAL_NODES[2];
-    onChange({
-      ...(meshing?.elementsPerLine !== undefined
-        ? { elementsPerLine: meshing.elementsPerLine }
-        : {}),
-      ...(isDefaultLocal ? {} : { localNodes: next }),
-    });
+    setLocalNodes(next);
   };
 
   return (
@@ -439,7 +515,25 @@ function MeshingEditor({
           ))}
         </div>
       </div>
-      <ShapeFunctionPlot nodes={localNodes} />
+      <div className="cad-mesh-row">
+        <label className="cad-mesh-label">Presets</label>
+        <div className="cad-mesh-presets">
+          {NODE_PRESETS.map((p) => (
+            <button
+              key={p.label}
+              type="button"
+              className="cad-mesh-preset"
+              onClick={() => setPreset(p.values)}
+              title={`Set local coords to ${p.values
+                .map(formatEta)
+                .join(", ")}`}
+            >
+              {p.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <ShapeFunctionPlot nodes={localNodes} onChange={setLocalNodes} />
     </div>
   );
 }
@@ -452,9 +546,13 @@ function MeshingEditor({
  */
 function ShapeFunctionPlot({
   nodes,
+  onChange,
 }: {
   nodes: readonly [number, number, number];
+  onChange?: (next: readonly [number, number, number]) => void;
 }) {
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [dragIdx, setDragIdx] = useState<0 | 1 | 2 | null>(null);
   const W = 260;
   const H = 130;
   const padL = 22;
@@ -471,6 +569,42 @@ function ShapeFunctionPlot({
     padL + ((x - xMin) / (xMax - xMin)) * innerW;
   const yPx = (y: number) =>
     padT + ((yMax - y) / (yMax - yMin)) * innerH;
+  // Convert a client-space x (CSS pixels) to η on the plot.
+  const clientToEta = (clientX: number): number => {
+    const svg = svgRef.current;
+    if (!svg) return 0;
+    const rect = svg.getBoundingClientRect();
+    // SVG uses viewBox 0..W with preserveAspectRatio=meet and height:auto,
+    // so client width maps linearly to viewBox width.
+    const svgX = ((clientX - rect.left) / rect.width) * W;
+    const frac = (svgX - padL) / innerW;
+    return xMin + frac * (xMax - xMin);
+  };
+
+  // Ref to the latest nodes so the move handler always sees the freshest
+  // triple without us having to re-attach window listeners every frame.
+  const nodesRef = useRef(nodes);
+  nodesRef.current = nodes;
+
+  // Global mouse handlers while dragging — listening on the window means
+  // the handle keeps tracking even when the cursor leaves the SVG.
+  useEffect(() => {
+    if (dragIdx === null) return;
+    const onMove = (e: MouseEvent) => {
+      const eta = clientToEta(e.clientX);
+      const cur = nodesRef.current;
+      const next = dragNode(cur, dragIdx, eta);
+      if (next !== cur) onChange?.(next);
+    };
+    const onUp = () => setDragIdx(null);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+    return () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dragIdx]);
 
   const SAMPLES = 81;
   const xs: number[] = [];
@@ -498,6 +632,7 @@ function ShapeFunctionPlot({
 
   return (
     <svg
+      ref={svgRef}
       viewBox={`0 0 ${W} ${H}`}
       preserveAspectRatio="xMidYMid meet"
       className="cad-mesh-plot"
@@ -585,6 +720,38 @@ function ShapeFunctionPlot({
       <text x={padL - 3} y={yPx(2) + 3} textAnchor="end" fontSize="8" fill="currentColor" opacity={0.55}>2</text>
       <text x={padL - 3} y={yPx(-1) + 3} textAnchor="end" fontSize="8" fill="currentColor" opacity={0.55}>−1</text>
       <text x={padL - 3} y={yPx(-2) + 3} textAnchor="end" fontSize="8" fill="currentColor" opacity={0.55}>−2</text>
+      {/* Draggable handles on the x-axis at each node coord — black filled
+          circles with a halo on hover/drag, slightly larger hit area for
+          easier grabbing. */}
+      {onChange &&
+        nodes.map((eta, k) => {
+          const idx = k as 0 | 1 | 2;
+          const active = dragIdx === idx;
+          return (
+            <g key={`h${k}`}>
+              <circle
+                cx={xPx(eta)}
+                cy={yPx(0)}
+                r={7}
+                fill="transparent"
+                style={{ cursor: "ew-resize" }}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  setDragIdx(idx);
+                }}
+              />
+              <circle
+                cx={xPx(eta)}
+                cy={yPx(0)}
+                r={active ? 4.5 : 3.5}
+                fill="black"
+                stroke="canvas"
+                strokeWidth={1.2}
+                pointerEvents="none"
+              />
+            </g>
+          );
+        })}
     </svg>
   );
 }
