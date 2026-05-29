@@ -493,24 +493,116 @@ export function CadCanvas() {
   /** Per-vertex Cartesian stress, lazily evaluated. We only pay the
    *  per-point Somigliana stress integral when a stress-derived field
    *  is selected; switching between σxx/σyy/τxy/σvm/σ1/σ2/τmax reuses
-   *  this memo. Boundary-adjacent vertices (BEM nodes / corner Points)
-   *  go through the same evaluator — D* / S* are near-singular there, so
-   *  those values are inaccurate. Acceptable for v1; future work: a
-   *  proper boundary-stress recovery from local tangential strain. */
+   *  this memo.
+   *
+   *  Boundary handling: D* ~ 1/r and S* ~ 1/r² blow up when the
+   *  evaluation point sits on Γ, so triangulation vertices that
+   *  coincide with a BEM node OR a corner geometry Point would read
+   *  garbage. Those are detected by position-match and their stress is
+   *  REPLACED with the mean of their non-boundary neighbours in the
+   *  triangulation. This is not a true boundary-stress recovery — that
+   *  needs the local tangential strain + applied traction at the
+   *  boundary point — but it keeps the colour scale meaningful (no
+   *  single near-singular value pinning the symmetric range). */
   const interiorStresses: readonly StressTriple[] | null = useMemo(() => {
     if (!stressActive || !internalTriangles || solvedMesh.length === 0) {
       return null;
     }
-    const out: StressTriple[] = new Array(internalTriangles.points.length);
-    for (let i = 0; i < internalTriangles.points.length; i++) {
-      out[i] = interiorStress(
+    const N = internalTriangles.points.length;
+    const POS_EPS = 1e-6;
+    const ptKey = (x: number, y: number) =>
+      `${Math.round(x / POS_EPS)}|${Math.round(y / POS_EPS)}`;
+
+    // Boundary lookup: any BEM mesh node position + any corner geometry
+    // Point position. These vertices live exactly on Γ.
+    const boundaryKeys = new Set<string>();
+    for (const el of solvedMesh) {
+      for (const n of el.nodes) boundaryKeys.add(ptKey(n.x, n.y));
+    }
+    for (const p of model.points) boundaryKeys.add(ptKey(p.x, p.y));
+
+    const isBoundary: boolean[] = new Array(N);
+    for (let i = 0; i < N; i++) {
+      const p = internalTriangles.points[i]!;
+      isBoundary[i] = boundaryKeys.has(ptKey(p.x, p.y));
+    }
+
+    // Pass 1: raw Somigliana stress at every vertex.
+    const raw: StressTriple[] = new Array(N);
+    for (let i = 0; i < N; i++) {
+      raw[i] = interiorStress(
         internalTriangles.points[i]!,
         solvedMesh,
         material,
       );
     }
+
+    // Build a vertex-adjacency set from the triangle list.
+    const neighbours: Set<number>[] = Array.from(
+      { length: N },
+      () => new Set<number>(),
+    );
+    for (const t of internalTriangles.triangles) {
+      neighbours[t.a]!.add(t.b);
+      neighbours[t.a]!.add(t.c);
+      neighbours[t.b]!.add(t.a);
+      neighbours[t.b]!.add(t.c);
+      neighbours[t.c]!.add(t.a);
+      neighbours[t.c]!.add(t.b);
+    }
+
+    // Pass 2: replace boundary-vertex stress with mean of non-boundary
+    // neighbours. If a boundary vertex has zero non-boundary neighbours
+    // (rare — happens in very coarse meshes) we fall back to the mean
+    // of ALL neighbours so the contour still has a finite value to
+    // interpolate against.
+    const out: StressTriple[] = new Array(N);
+    for (let i = 0; i < N; i++) {
+      if (!isBoundary[i]) {
+        out[i] = raw[i]!;
+        continue;
+      }
+      let sxx = 0;
+      let syy = 0;
+      let sxy = 0;
+      let cnt = 0;
+      for (const j of neighbours[i]!) {
+        if (isBoundary[j]) continue;
+        const r = raw[j]!;
+        if (
+          Number.isFinite(r.sxx) &&
+          Number.isFinite(r.syy) &&
+          Number.isFinite(r.sxy)
+        ) {
+          sxx += r.sxx;
+          syy += r.syy;
+          sxy += r.sxy;
+          cnt++;
+        }
+      }
+      if (cnt === 0) {
+        for (const j of neighbours[i]!) {
+          const r = raw[j]!;
+          if (
+            Number.isFinite(r.sxx) &&
+            Number.isFinite(r.syy) &&
+            Number.isFinite(r.sxy)
+          ) {
+            sxx += r.sxx;
+            syy += r.syy;
+            sxy += r.sxy;
+            cnt++;
+          }
+        }
+      }
+      out[i] =
+        cnt > 0
+          ? { sxx: sxx / cnt, syy: syy / cnt, sxy: sxy / cnt }
+          : { sxx: 0, syy: 0, sxy: 0 };
+    }
+
     return out;
-  }, [stressActive, internalTriangles, solvedMesh, material]);
+  }, [stressActive, internalTriangles, solvedMesh, material, model.points]);
 
   /** Active interior field values at every triangulation vertex.
    *  Displacement fields: BEM-node coincident points use the solved
