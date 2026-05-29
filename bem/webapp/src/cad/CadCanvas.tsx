@@ -303,175 +303,48 @@ export function CadCanvas() {
    *  one element AND the solver returned a non-zero motion. */
   const canShowResults = solvedMesh.length > 0 && deformedScale !== null;
 
-  /** Interior post-process nodes built in three passes:
-   *  1. CREATE — for each element + each of its 3 localNodes η values,
-   *     place an inward-offset node at 0.5 × element chord from the
-   *     isoparametric position on the element. Dedup on near-coincident
-   *     world positions during creation (handles continuous-scheme
-   *     shared corners).
-   *  2. BOUNDARY FILTER — drop candidates that are outside the domain,
-   *     inside any hole, or within `MIN_DIST_TO_BOUNDARY × chord` of
-   *     any boundary segment.
-   *  3. CLUSTER MERGE — within a larger tolerance, collapse near-
-   *     coincident accepted nodes into one (first-encountered wins). */
+  /** Internal nodes — single ring inward from every element at offset
+   *  0.25 × element chord. Each element contributes 3 nodes (one per
+   *  localNodes η). Dedup only on near-exact coincidence so continuous-
+   *  scheme shared corner nodes collapse to one — no boundary filtering
+   *  yet, so nodes may land outside the domain in tight regions; we'll
+   *  add filtering / further rings back later. */
   const internalNodes: readonly Vec2[] = useMemo(() => {
     if (meshElements.length === 0) return [];
-    if (model.domains.length === 0) return [];
-
     const ANCHORS = STANDARD_NODES.continuous;
-    // Tolerances expressed as a fraction of the SOURCE element's chord,
-    // not the global average — so a small arc element doesn't get its
-    // candidates rejected by a threshold scaled to the long outer
-    // elements. Offset is 0.5 × chord, so anything below 0.5 here is
-    // guaranteed to pass the candidate's own boundary edge.
-    const MIN_DIST_TO_BOUNDARY_FRAC = 0.4;
-    const CLUSTER_FRAC = 0.2;
-
-    // ── 0. Boundary polygons from the geometry (outer + holes). For
-    //       arc segments, sample 12 intermediates so chord/arc fit is
-    //       reasonable. Used by both the inside-test and the proximity
-    //       test below.
-    const ARC_SAMPLES = 12;
-    const linesById = new Map(model.lines.map((l) => [l.id, l]));
-    const pointsById = pointsByIdLookup(model.points);
-    type Poly = { points: Vec2[]; orientation: "ccw" | "cw" };
-    const polysByDomain: Poly[] = [];
-    domainLoop: for (const domain of model.domains) {
-      const polys: Poly[] = [];
-      for (const bId of domain.boundaryIds) {
-        const b = model.boundaries.find((bb) => bb.id === bId);
-        if (!b || b.segments.length === 0) continue;
-        const pts: Vec2[] = [];
-        for (const seg of b.segments) {
-          const line = linesById.get(seg.lineId);
-          if (!line) continue;
-          const sId = seg.direction === 1 ? line.startId : line.endId;
-          const eId = seg.direction === 1 ? line.endId : line.startId;
-          const s = pointsById.get(sId);
-          const e = pointsById.get(eId);
-          if (!s || !e) continue;
-          pts.push({ x: s.x, y: s.y });
-          if (line.arcCentreId !== undefined) {
-            const lineStart = pointsById.get(line.startId);
-            const lineEnd = pointsById.get(line.endId);
-            const centre = pointsById.get(line.arcCentreId);
-            if (!lineStart || !lineEnd || !centre) continue;
-            for (let i = 1; i < ARC_SAMPLES; i++) {
-              const tSeg = i / ARC_SAMPLES;
-              const tLine = seg.direction === 1 ? tSeg : 1 - tSeg;
-              pts.push(arcPoint(lineStart, lineEnd, centre, tLine));
-            }
-          }
-        }
-        if (pts.length < 3) continue;
-        const ori = loopOrientation(b.segments, model);
-        if (ori === "degenerate") continue;
-        polys.push({ points: pts, orientation: ori });
+    const COINCIDENT_TOL = 1e-6;
+    const COINCIDENT_TOL2 = COINCIDENT_TOL * COINCIDENT_TOL;
+    const out: Vec2[] = [];
+    const addUnique = (p: Vec2) => {
+      for (const q of out) {
+        const dx = p.x - q.x;
+        const dy = p.y - q.y;
+        if (dx * dx + dy * dy < COINCIDENT_TOL2) return;
       }
-      const outer = polys.find((p) => p.orientation === "ccw");
-      if (outer) {
-        polysByDomain.push(outer);
-        for (const p of polys) if (p !== outer) polysByDomain.push(p);
-        break domainLoop;
+      out.push(p);
+    };
+    for (const el of meshElements) {
+      const a0 = el.anchors[0];
+      const a1 = el.anchors[1];
+      const a2 = el.anchors[2];
+      const chord = Math.hypot(a2.x - a0.x, a2.y - a0.y);
+      if (chord === 0) continue;
+      const offset = 0.25 * chord;
+      for (const eta of el.localNodes) {
+        const Ns = shapeFunctions(eta, ANCHORS);
+        const px = Ns[0] * a0.x + Ns[1] * a1.x + Ns[2] * a2.x;
+        const py = Ns[0] * a0.y + Ns[1] * a1.y + Ns[2] * a2.y;
+        const dN = shapeFunctionDerivatives(eta, ANCHORS);
+        const tx = dN[0] * a0.x + dN[1] * a1.x + dN[2] * a2.x;
+        const ty = dN[0] * a0.y + dN[1] * a1.y + dN[2] * a2.y;
+        const tl = Math.hypot(tx, ty) || 1;
+        const nx = ty / tl;
+        const ny = -tx / tl;
+        addUnique({ x: px - nx * offset, y: py - ny * offset });
       }
     }
-    if (polysByDomain.length === 0) return [];
-    const outerPoly = polysByDomain[0]!;
-    const holePolys = polysByDomain.slice(1);
-
-    // ── Ring expansion: ring k sits at offset 0.25 × 2^(k-1) × chord
-    //    inward from the boundary, doubling each ring (0.25, 0.5, 1.0,
-    //    2.0, 4.0, ...). All rings use the element's own localNodes η
-    //    positions (no staggering — successive rings line up radially).
-    //    Loop stops when a ring contributes zero new accepted nodes:
-    //    waves from opposing boundaries have met.
-    const MAX_RINGS = 10;
-    const final: Vec2[] = [];
-    const finalChords: number[] = [];
-
-    for (let ring = 1; ring <= MAX_RINGS; ring++) {
-      const offsetFactor = 0.25 * Math.pow(2, ring - 1);
-      // Generate ring `ring` candidates.
-      const ringCandidates: { p: Vec2; chord: number }[] = [];
-      for (const el of meshElements) {
-        const a0 = el.anchors[0];
-        const a1 = el.anchors[1];
-        const a2 = el.anchors[2];
-        const chord = Math.hypot(a2.x - a0.x, a2.y - a0.y);
-        if (chord === 0) continue;
-        const offset = offsetFactor * chord;
-        for (const eta of el.localNodes) {
-          const Ns = shapeFunctions(eta, ANCHORS);
-          const px = Ns[0] * a0.x + Ns[1] * a1.x + Ns[2] * a2.x;
-          const py = Ns[0] * a0.y + Ns[1] * a1.y + Ns[2] * a2.y;
-          const dN = shapeFunctionDerivatives(eta, ANCHORS);
-          const tx = dN[0] * a0.x + dN[1] * a1.x + dN[2] * a2.x;
-          const ty = dN[0] * a0.y + dN[1] * a1.y + dN[2] * a2.y;
-          const tl = Math.hypot(tx, ty) || 1;
-          const nx = ty / tl;
-          const ny = -tx / tl;
-          ringCandidates.push({
-            p: { x: px - nx * offset, y: py - ny * offset },
-            chord,
-          });
-        }
-      }
-
-      // Filter: outside domain / in hole / too close to boundary.
-      const insideKept: { p: Vec2; chord: number }[] = [];
-      for (const c of ringCandidates) {
-        if (!pointInPolygon(c.p, outerPoly.points)) continue;
-        let inHole = false;
-        for (const h of holePolys) {
-          if (pointInPolygon(c.p, h.points)) {
-            inHole = true;
-            break;
-          }
-        }
-        if (inHole) continue;
-        const boundaryTol = MIN_DIST_TO_BOUNDARY_FRAC * c.chord;
-        const boundaryTol2 = boundaryTol * boundaryTol;
-        let tooClose = false;
-        for (const poly of polysByDomain) {
-          if (minSqDistToPolygonEdges(c.p, poly.points) < boundaryTol2) {
-            tooClose = true;
-            break;
-          }
-        }
-        if (tooClose) continue;
-        insideKept.push(c);
-      }
-
-      // Cluster against ALL previously accepted nodes (across rings).
-      let addedThisRing = 0;
-      for (const c of insideKept) {
-        let dup = false;
-        for (let i = 0; i < final.length; i++) {
-          const q = final[i]!;
-          const dx = c.p.x - q.x;
-          const dy = c.p.y - q.y;
-          const tol = CLUSTER_FRAC * Math.min(c.chord, finalChords[i]!);
-          if (dx * dx + dy * dy < tol * tol) {
-            dup = true;
-            break;
-          }
-        }
-        if (!dup) {
-          final.push(c.p);
-          finalChords.push(c.chord);
-          addedThisRing++;
-        }
-      }
-      if (addedThisRing === 0) break;
-    }
-    return final;
-  }, [
-    meshElements,
-    model.points,
-    model.lines,
-    model.boundaries,
-    model.domains,
-  ]);
+    return out;
+  }, [meshElements]);
   const canShowInternalNodes = model.domains.length > 0;
 
   /**
