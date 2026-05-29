@@ -24,7 +24,12 @@
 
 import poly2tri from "poly2tri";
 import type { CadModel, Id, Vec2 } from "../geometry/types.js";
+import { arcPoint } from "../geometry/arc.js";
 import { loopOrientation } from "../geometry/orientation.js";
+
+/** Intermediate samples per arc segment when discretising arcs into the
+ *  constrained-Delaunay polygon. Higher = closer fit to the true arc. */
+const ARC_SUBDIVISIONS = 12;
 
 export interface T6Triangle {
   /** 6 node indices into the post-mesh nodes array (3 vertex + 3 midpoints). */
@@ -56,28 +61,31 @@ export function triangulateDomain(
 ): PostMesh | null {
   const density = opts.density ?? DEFAULT_DENSITY;
   if (model.domains.length === 0) return null;
-  const domain = model.domains[0]!;
 
-  // Collect the boundary polygons. Each boundary is a closed loop of
-  // line segments → ordered sequence of Points along the loop.
-  const polys: { points: Vec2[]; orientation: "ccw" | "cw" }[] = [];
-  for (const bId of domain.boundaryIds) {
-    const b = model.boundaries.find((bb) => bb.id === bId);
-    if (!b || b.segments.length === 0) continue;
-    const pts = boundaryPolygon(b, model);
-    if (!pts || pts.length < 3) continue;
-    const ori = loopOrientation(b.segments, model);
-    if (ori === "degenerate") continue;
-    polys.push({ points: pts, orientation: ori });
+  // Scan domains for the first one with a usable boundary set (CCW outer
+  // + optional holes). User models sometimes accumulate empty domains
+  // (leftover Create-domain clicks before lines existed); skip those.
+  let outer: { points: Vec2[]; orientation: "ccw" | "cw" } | null = null;
+  let holes: { points: Vec2[]; orientation: "ccw" | "cw" }[] = [];
+  for (const domain of model.domains) {
+    const polys: { points: Vec2[]; orientation: "ccw" | "cw" }[] = [];
+    for (const bId of domain.boundaryIds) {
+      const b = model.boundaries.find((bb) => bb.id === bId);
+      if (!b || b.segments.length === 0) continue;
+      const pts = boundaryPolygon(b, model);
+      if (!pts || pts.length < 3) continue;
+      const ori = loopOrientation(b.segments, model);
+      if (ori === "degenerate") continue;
+      polys.push({ points: pts, orientation: ori });
+    }
+    const candidate = polys.find((p) => p.orientation === "ccw");
+    if (candidate) {
+      outer = candidate;
+      holes = polys.filter((p) => p !== candidate);
+      break;
+    }
   }
-  if (polys.length === 0) return null;
-
-  // Outer = the CCW (bounded) loop; holes = the CW loops. If multiple
-  // CCW loops exist, just pick the first and treat the rest as outer
-  // contours of separate triangulations (we just do the first for now).
-  const outer = polys.find((p) => p.orientation === "ccw");
   if (!outer) return null;
-  const holes = polys.filter((p) => p !== outer);
 
   // Build the Steiner grid inside the outer AABB, masked to domain.
   let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
@@ -178,8 +186,11 @@ export function triangulateDomain(
   return { nodes, triangles, vertexCount };
 }
 
-/** Walk a boundary's segments and return the ordered sequence of Point
- *  positions encountered, in traversal direction. */
+/** Walk a boundary's segments and return the ordered sequence of points
+ *  encountered, in traversal direction. Straight segments contribute
+ *  just the start point; arc segments contribute the start + multiple
+ *  intermediate samples along the curve, so the polygon hugs the arc
+ *  instead of cutting across the chord. */
 function boundaryPolygon(
   b: { segments: readonly { lineId: Id; direction: 1 | -1 }[] },
   model: Pick<CadModel, "lines" | "points">,
@@ -194,6 +205,22 @@ function boundaryPolygon(
     const s = pointsById.get(startId);
     if (!s) return null;
     out.push({ x: s.x, y: s.y });
+
+    // For arc segments, add intermediate samples along the curve so the
+    // constrained polygon approximates the arc, not its chord.
+    if (line.arcCentreId !== undefined) {
+      const lineStart = pointsById.get(line.startId);
+      const lineEnd = pointsById.get(line.endId);
+      const centre = pointsById.get(line.arcCentreId);
+      if (!lineStart || !lineEnd || !centre) return null;
+      for (let i = 1; i < ARC_SUBDIVISIONS; i++) {
+        const tSeg = i / ARC_SUBDIVISIONS; // 0 → seg start, 1 → seg end
+        // arcPoint uses line-parametric t (start of line → end of line),
+        // so flip when the segment traverses the line in reverse.
+        const tLine = seg.direction === 1 ? tSeg : 1 - tSeg;
+        out.push(arcPoint(lineStart, lineEnd, centre, tLine));
+      }
+    }
   }
   return out;
 }
