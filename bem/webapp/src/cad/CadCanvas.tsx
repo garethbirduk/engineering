@@ -312,7 +312,7 @@ export function CadCanvas() {
   const internalNodes: readonly Vec2[] = useMemo(() => {
     if (meshElements.length === 0) return [];
     const ANCHORS = STANDARD_NODES.continuous;
-    const RING_OFFSET_FACTORS: readonly number[] = [0.25, 0.5];
+    const RING_OFFSET_FACTORS: readonly number[] = [0.25, 0.75];
     const COINCIDENT_TOL = 1e-6;
     const COINCIDENT_TOL2 = COINCIDENT_TOL * COINCIDENT_TOL;
     const out: Vec2[] = [];
