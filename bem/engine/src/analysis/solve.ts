@@ -1,38 +1,41 @@
-// Placeholder synchronous solver.
+// Real direct-BEM solver for 2D plane elasticity.
 //
-// API: solve(mesh, material) → solvedMesh
-// Same signature the real BEM kernel will take. Today's implementation
-// produces a plausible-shaped deformation so the visualisation pipeline
-// can be built and exercised before the real kernel lands.
-//
-// Approach: for any node whose displacement DOF is unknown (NaN), set
-// it to a strain-like value (distance from the "constrained centroid"
-// along that axis times max applied traction / E). For any node whose
-// traction DOF is unknown, set it to zero (real solver computes the
-// reaction). This isn't physically correct — it's just enough motion
-// for the deformed-shape overlay to mean something visually.
+// Pipeline (walking-skeleton stage of the strategy in
+// BEM-SOLVER-STRATEGY.md — no caching yet):
+//   1. Assemble H and G across all (collocation node, source element)
+//      pairs via isoparametric Gauss-Legendre integration of the Kelvin
+//      kernels (kernels.ts + elementIntegration.ts + assemble.ts).
+//   2. Apply the rigid-body trick for the diagonal H block — done
+//      during assembly.
+//   3. Partition: for each DOF, exactly one of u or t is known (from
+//      the BC fanned out at discretise time); the other is the unknown.
+//      Build A x = b where columns from known-u DOFs come from -G,
+//      columns from known-t DOFs come from H, and b accumulates the
+//      known-DOF contributions.
+//   4. Solve A x = b with ml-matrix's LU.
+//   5. Backfill the mesh: each node's NaN DOFs replaced with the
+//      solved values; known DOFs preserved verbatim.
 
+import { Matrix, solve as solveLinear } from "ml-matrix";
 import type { MeshElement, MeshNode } from "../elements/discretise.js";
+import { assembleHG } from "./assemble.js";
+import {
+  DEFAULT_MATERIAL,
+  type MaterialProperties,
+} from "./kernels.js";
 
-/** Material properties for 2D linear elastic analysis. */
-export interface MaterialProperties {
-  /** Young's modulus in Pa. */
-  readonly E: number;
-  /** Poisson's ratio (dimensionless). */
-  readonly nu: number;
-}
-
-/** Default: mild steel. */
-export const DEFAULT_MATERIAL: MaterialProperties = {
-  E: 200e9,
-  nu: 0.3,
-};
+export { DEFAULT_MATERIAL, type MaterialProperties };
 
 /**
  * Resolve every NaN DOF on the mesh into a number, returning a NEW mesh
- * (input is not mutated — input nodes are referentially preserved when
- * possible; output replaces the nodes that needed solving). Real BEM
- * lands behind this same signature later.
+ * (input is not mutated). For each DOF (i, α) exactly one of u or t is
+ * already known (from the BC fanned out at discretise time); the other
+ * is the unknown the solver computes.
+ *
+ * If the system is singular (e.g. no displacement BCs anywhere → rigid-
+ * body modes unconstrained, or pathologically conditioned) we catch the
+ * solve failure and return the input mesh unchanged — the visualisation
+ * layer just won't show results.
  */
 export function solve(
   mesh: readonly MeshElement[],
@@ -40,72 +43,110 @@ export function solve(
 ): MeshElement[] {
   if (mesh.length === 0) return [];
 
-  // Pass 1: gather stats over all nodes.
-  let xConstrainedSum = 0;
-  let xConstrainedCount = 0;
-  let yConstrainedSum = 0;
-  let yConstrainedCount = 0;
-  let maxTx = 0;
-  let maxTy = 0;
-  for (const el of mesh) {
-    for (const n of el.nodes) {
-      if (!Number.isNaN(n.ux)) {
-        xConstrainedSum += n.x;
-        xConstrainedCount++;
-      }
-      if (!Number.isNaN(n.uy)) {
-        yConstrainedSum += n.y;
-        yConstrainedCount++;
-      }
-      if (!Number.isNaN(n.tx)) maxTx = Math.max(maxTx, Math.abs(n.tx));
-      if (!Number.isNaN(n.ty)) maxTy = Math.max(maxTy, Math.abs(n.ty));
-    }
-  }
-  // Fallback when there are no constrained displacement DOFs at all
-  // (degenerate case — the real solver would refuse, we just keep the
-  // motion measurable).
-  let xC = xConstrainedCount > 0 ? xConstrainedSum / xConstrainedCount : 0;
-  let yC = yConstrainedCount > 0 ? yConstrainedSum / yConstrainedCount : 0;
+  const sys = assembleHG(mesh, material);
+  const N = sys.nodesByIndex.length;
+  const size = 2 * N;
 
-  // Sign of net traction (right edge pulling right → +ux on free nodes).
-  // We use the max-magnitude traction direction as a proxy for net force.
-  let netTxSign = 0;
-  let netTySign = 0;
-  for (const el of mesh) {
-    for (const n of el.nodes) {
-      if (!Number.isNaN(n.tx) && Math.abs(n.tx) === maxTx) {
-        netTxSign = Math.sign(n.tx);
-      }
-      if (!Number.isNaN(n.ty) && Math.abs(n.ty) === maxTy) {
-        netTySign = Math.sign(n.ty);
+  // Build the LHS A (size × size) and RHS b (size × 1) one DOF at a time.
+  // For each (i, α) DOF, exactly one of u_iα and t_iα is known (NaN
+  // marks the unknown). The known value contributes to b; the unknown
+  // gets its column lifted from either H or -G into A.
+  const A = Matrix.zeros(size, size);
+  const b = Matrix.zeros(size, 1);
+
+  for (let i = 0; i < N; i++) {
+    const node = sys.nodesByIndex[i]!;
+    for (let alpha = 0; alpha < 2; alpha++) {
+      const col = 2 * i + alpha;
+      const u = alpha === 0 ? node.ux : node.uy;
+      const t = alpha === 0 ? node.tx : node.ty;
+      const uKnown = !Number.isNaN(u);
+      const tKnown = !Number.isNaN(t);
+      // Exactly one should be known. Degenerate cases (both NaN or both
+      // numeric) get skipped — column stays zero → singular row.
+      if (uKnown === tKnown) continue;
+
+      if (uKnown) {
+        // u known → unknown is t. A column = -G column. b -= H col * u.
+        for (let row = 0; row < size; row++) {
+          A.set(row, col, -sys.G.get(row, col));
+          b.set(row, 0, b.get(row, 0) - sys.H.get(row, col) * u);
+        }
+      } else {
+        // t known → unknown is u. A column = +H column. b += G col * t.
+        for (let row = 0; row < size; row++) {
+          A.set(row, col, sys.H.get(row, col));
+          b.set(row, 0, b.get(row, 0) + sys.G.get(row, col) * t);
+        }
       }
     }
   }
 
-  const strainX = (maxTx / material.E) * netTxSign;
-  const strainY = (maxTy / material.E) * netTySign;
+  // Solve. ml-matrix's solve uses LU under the hood for square systems.
+  let x: Matrix;
+  try {
+    x = solveLinear(A, b);
+  } catch {
+    // Singular / unsolvable — return the input mesh untouched so the
+    // viz layer just shows no displacement overlay.
+    return mesh.map((el) => ({ ...el }));
+  }
 
-  return mesh.map((el) => ({
-    ...el,
-    nodes: [
-      fillNaNs(el.nodes[0]!, xC, yC, strainX, strainY),
-      fillNaNs(el.nodes[1]!, xC, yC, strainX, strainY),
-      fillNaNs(el.nodes[2]!, xC, yC, strainX, strainY),
-    ] as const,
-  }));
+  // Backfill per-node solved DOFs into a flat array indexed by global node.
+  type SolvedDofs = { ux: number; uy: number; tx: number; ty: number };
+  const perNode: SolvedDofs[] = new Array(N);
+  for (let i = 0; i < N; i++) {
+    const node = sys.nodesByIndex[i]!;
+    const sol: SolvedDofs = {
+      ux: node.ux,
+      uy: node.uy,
+      tx: node.tx,
+      ty: node.ty,
+    };
+    for (let alpha = 0; alpha < 2; alpha++) {
+      const col = 2 * i + alpha;
+      const u = alpha === 0 ? node.ux : node.uy;
+      const t = alpha === 0 ? node.tx : node.ty;
+      const uKnown = !Number.isNaN(u);
+      const tKnown = !Number.isNaN(t);
+      if (uKnown === tKnown) continue;
+      const xVal = x.get(col, 0);
+      if (alpha === 0) {
+        if (uKnown) sol.tx = xVal;
+        else sol.ux = xVal;
+      } else {
+        if (uKnown) sol.ty = xVal;
+        else sol.uy = xVal;
+      }
+    }
+    perNode[i] = sol;
+  }
+
+  // Build the solved mesh: copy each element, replace its 3 nodes with
+  // fresh MeshNodes carrying the solved DOFs (at the global index).
+  return mesh.map((el) => {
+    const idxs = sys.elementNodeIndex.get(el)!;
+    return {
+      ...el,
+      nodes: [
+        applySolution(el.nodes[0]!, perNode[idxs[0]]!),
+        applySolution(el.nodes[1]!, perNode[idxs[1]]!),
+        applySolution(el.nodes[2]!, perNode[idxs[2]]!),
+      ] as const,
+    };
+  });
 }
 
-function fillNaNs(
-  n: MeshNode,
-  xC: number,
-  yC: number,
-  strainX: number,
-  strainY: number,
+function applySolution(
+  orig: MeshNode,
+  sol: { ux: number; uy: number; tx: number; ty: number },
 ): MeshNode {
-  const ux = Number.isNaN(n.ux) ? (n.x - xC) * strainX : n.ux;
-  const uy = Number.isNaN(n.uy) ? (n.y - yC) * strainY : n.uy;
-  const tx = Number.isNaN(n.tx) ? 0 : n.tx;
-  const ty = Number.isNaN(n.ty) ? 0 : n.ty;
-  if (ux === n.ux && uy === n.uy && tx === n.tx && ty === n.ty) return n;
-  return { x: n.x, y: n.y, ux, uy, tx, ty };
+  return {
+    x: orig.x,
+    y: orig.y,
+    ux: sol.ux,
+    uy: sol.uy,
+    tx: sol.tx,
+    ty: sol.ty,
+  };
 }

@@ -112,6 +112,13 @@ export interface MeshElement {
   readonly start: Vec2;
   readonly end: Vec2;
   /**
+   * World positions of the 3 isoparametric geometry anchors at element-
+   * local η = -1, 0, +1. Anchors define the element's quadratic geometry;
+   * solver integrations evaluate x(η) and dx/dη via shape functions on
+   * these. anchors[0] === start, anchors[2] === end by construction.
+   */
+  readonly anchors: readonly [Vec2, Vec2, Vec2];
+  /**
    * 3 nodes at the local η coords. Each carries its world position AND
    * the 4 DOFs (ux, uy, tx, ty) — knowns populated from the line's BC,
    * unknowns set to NaN. After solve() runs, the unknowns are filled in.
@@ -228,6 +235,7 @@ export function discretiseLines(
         tEnd,
         start,
         end,
+        anchors: [anchor0, anchor1, anchor2] as const,
         nodes: [nodePts[0]!, nodePts[1]!, nodePts[2]!] as const,
         localNodes: [nodes[0]!, nodes[1]!, nodes[2]!] as const,
         nodeTs: [nodeTs[0]!, nodeTs[1]!, nodeTs[2]!] as const,
