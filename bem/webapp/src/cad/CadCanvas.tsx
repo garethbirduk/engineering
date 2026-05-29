@@ -29,6 +29,7 @@ import {
 import {
   arcPoint,
   arcSvgPathD,
+  boundaryStress,
   discretiseLines,
   interiorDisplacement,
   interiorStress,
@@ -45,7 +46,12 @@ import {
 } from "@bem/engine";
 import { Toolbar } from "./Toolbar.js";
 import { InfoPanel } from "./InfoPanel.js";
-import { ResultsPanel, type FieldStats } from "./ResultsPanel.js";
+import {
+  ResultsPanel,
+  type EdgeProfile,
+  type FieldStats,
+  type InteriorField,
+} from "./ResultsPanel.js";
 import { divergingUxColor } from "./colorScale.js";
 import { gridStepForViewWidth } from "./gridStep.js";
 import { snapWorld } from "./snap.js";
@@ -200,6 +206,55 @@ function minSqDistToPolygonEdges(p: Vec2, poly: readonly Vec2[]): number {
     if (sq < minSq) minSq = sq;
   }
   return minSq;
+}
+
+/** Pick the active interior field's scalar value at parametric `eta`
+ *  on a boundary element. Displacement fields are direct shape-function
+ *  interpolation of the nodal DOFs; stress fields go through
+ *  `boundaryStress` (Kelvin recovery), so we never hit the singular
+ *  Somigliana stress integrand on Γ. Derived scalars (σvm, σ1, σ2, τmax)
+ *  are simple algebra on the Cartesian stress tensor. */
+function evaluateEdgeField(
+  el: MeshElement,
+  eta: number,
+  field: InteriorField,
+  material: MaterialProperties,
+): number {
+  if (field === "ux" || field === "uy") {
+    const Nf = shapeFunctions(eta, el.localNodes);
+    const v0 = field === "ux" ? el.nodes[0].ux : el.nodes[0].uy;
+    const v1 = field === "ux" ? el.nodes[1].ux : el.nodes[1].uy;
+    const v2 = field === "ux" ? el.nodes[2].ux : el.nodes[2].uy;
+    return Nf[0] * v0 + Nf[1] * v1 + Nf[2] * v2;
+  }
+  const s = boundaryStress(el, eta, material);
+  switch (field) {
+    case "sxx":
+      return s.sxx;
+    case "syy":
+      return s.syy;
+    case "sxy":
+      return s.sxy;
+    case "tmax":
+      return Math.hypot((s.sxx - s.syy) / 2, s.sxy);
+    case "s1":
+      return (s.sxx + s.syy) / 2 + Math.hypot((s.sxx - s.syy) / 2, s.sxy);
+    case "s2":
+      return (s.sxx + s.syy) / 2 - Math.hypot((s.sxx - s.syy) / 2, s.sxy);
+    case "svm": {
+      const szz =
+        material.planeKind === "strain"
+          ? material.nu * (s.sxx + s.syy)
+          : 0;
+      return Math.sqrt(
+        0.5 *
+          ((s.sxx - s.syy) ** 2 +
+            (s.syy - szz) ** 2 +
+            (szz - s.sxx) ** 2 +
+            6 * s.sxy * s.sxy),
+      );
+    }
+  }
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -726,6 +781,130 @@ export function CadCanvas() {
     internalTriangles.triangles.length > 0 &&
     solvedMesh.length > 0 &&
     deformedScale !== null;
+
+  /** Profile of the active interior field along the currently-selected
+   *  boundary line(s), arc-length parameterised. For multiple selected
+   *  lines, segments are concatenated in selection order. Stress values
+   *  come from `boundaryStress` (Kelvin recovery from traction +
+   *  tangential strain) — no singular Somigliana evaluation here. */
+  const edgeProfile: EdgeProfile | null = useMemo(() => {
+    if (!interiorField || solvedMesh.length === 0) return null;
+    const selectedLineIds = selection
+      .filter((s) => s.kind === "line")
+      .map((s) => s.id);
+    if (selectedLineIds.length === 0) return null;
+
+    // Index solved mesh elements by line so we can walk them in order.
+    const solvedByLine = new Map<string, MeshElement[]>();
+    for (const el of solvedMesh) {
+      const arr = solvedByLine.get(el.lineId);
+      if (arr) arr.push(el);
+      else solvedByLine.set(el.lineId, [el]);
+    }
+    for (const arr of solvedByLine.values()) {
+      arr.sort((a, b) => a.indexInLine - b.indexInLine);
+    }
+
+    const ANCHORS = STANDARD_NODES.continuous;
+    const SAMPLES_PER_ELEM = 20;
+
+    const curveByLine: { lineId: string; arc: number; value: number }[][] = [];
+    const nodes: { arc: number; value: number; lineId: string }[] = [];
+    const segments: {
+      lineId: string;
+      startArc: number;
+      endArc: number;
+      startPoint: Vec2;
+      endPoint: Vec2;
+    }[] = [];
+
+    let arcOffset = 0;
+
+    for (const lineId of selectedLineIds) {
+      const els = solvedByLine.get(lineId);
+      if (!els || els.length === 0) continue;
+      const segStartArc = arcOffset;
+      const segCurve: { lineId: string; arc: number; value: number }[] = [];
+      let segStartPoint: Vec2 | null = null;
+      let segEndPoint: Vec2 | null = null;
+
+      for (const el of els) {
+        const a0 = el.anchors[0];
+        const a1 = el.anchors[1];
+        const a2 = el.anchors[2];
+
+        const samplePositions: { eta: number; arc: number }[] = [];
+        let prev: Vec2 | null = null;
+
+        for (let i = 0; i <= SAMPLES_PER_ELEM; i++) {
+          const eta = -1 + (2 * i) / SAMPLES_PER_ELEM;
+          const Ng = shapeFunctions(eta, ANCHORS);
+          const x = Ng[0] * a0.x + Ng[1] * a1.x + Ng[2] * a2.x;
+          const y = Ng[0] * a0.y + Ng[1] * a1.y + Ng[2] * a2.y;
+          if (prev) {
+            arcOffset += Math.hypot(x - prev.x, y - prev.y);
+          } else if (segStartPoint === null) {
+            segStartPoint = { x, y };
+          }
+          prev = { x, y };
+          samplePositions.push({ eta, arc: arcOffset });
+          const value = evaluateEdgeField(
+            el,
+            eta,
+            interiorField,
+            material,
+          );
+          segCurve.push({ lineId, arc: arcOffset, value });
+        }
+        if (prev) segEndPoint = prev;
+
+        // Node samples — find arc length at each node's η by linear
+        // interpolation between bracketing sample positions.
+        for (let k = 0; k < 3; k++) {
+          const nodeEta = el.localNodes[k]!;
+          let lo = 0;
+          while (
+            lo < samplePositions.length - 1 &&
+            samplePositions[lo + 1]!.eta < nodeEta
+          ) {
+            lo++;
+          }
+          const sLo = samplePositions[lo]!;
+          const sHi =
+            samplePositions[Math.min(lo + 1, samplePositions.length - 1)]!;
+          const denom = sHi.eta - sLo.eta;
+          const frac = denom === 0 ? 0 : (nodeEta - sLo.eta) / denom;
+          const nodeArc = sLo.arc + frac * (sHi.arc - sLo.arc);
+          const value = evaluateEdgeField(
+            el,
+            nodeEta,
+            interiorField,
+            material,
+          );
+          nodes.push({ arc: nodeArc, value, lineId });
+        }
+      }
+
+      segments.push({
+        lineId,
+        startArc: segStartArc,
+        endArc: arcOffset,
+        startPoint: segStartPoint ?? { x: 0, y: 0 },
+        endPoint: segEndPoint ?? { x: 0, y: 0 },
+      });
+      curveByLine.push(segCurve);
+    }
+
+    if (segments.length === 0) return null;
+
+    return {
+      field: interiorField,
+      totalArc: arcOffset,
+      curveByLine,
+      nodes,
+      segments,
+    };
+  }, [selection, interiorField, solvedMesh, material]);
 
   /**
    * For every (lineId, indexInLine, nodeIdx) triple, is this node's
@@ -2213,6 +2392,7 @@ export function CadCanvas() {
           activeField={interiorField}
           stats={interiorFieldStats}
           canShowResults={canShowInteriorResults}
+          edgeProfile={edgeProfile}
           onSelectField={(field) =>
             dispatch({ type: "setInteriorField", field })
           }

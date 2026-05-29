@@ -376,6 +376,14 @@ body,
   border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
 }
 
+.results-edge-plot {
+  width: 100%;
+  height: auto;
+  border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+  border-radius: 0.2rem;
+  background: color-mix(in srgb, canvas 98%, currentColor 2%);
+}
+
 .results-footer-hint {
   margin-top: auto;
   font-size: 0.72rem;
