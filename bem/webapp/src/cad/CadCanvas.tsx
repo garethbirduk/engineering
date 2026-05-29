@@ -332,10 +332,32 @@ export function CadCanvas() {
         const seg = segs[i]!;
         const line = linesById.get(seg.lineId);
         if (!line) return null;
+        // Resolve traversal start/end honouring segment direction.
         const startId = seg.direction === 1 ? line.startId : line.endId;
-        const p = pointsById.get(startId);
-        if (!p) return null;
-        sub += `${i === 0 ? "M" : "L"} ${p.x} ${p.y} `;
+        const endId = seg.direction === 1 ? line.endId : line.startId;
+        const start = pointsById.get(startId);
+        const end = pointsById.get(endId);
+        if (!start || !end) return null;
+        // First segment opens the path with M to the start point.
+        if (i === 0) sub += `M ${start.x} ${start.y} `;
+        if (line.arcCentreId !== undefined) {
+          // Arc segment — follow the curve, not the chord. SVG `A` command.
+          const centre = pointsById.get(line.arcCentreId);
+          if (!centre) return null;
+          const r = Math.hypot(centre.x - start.x, centre.y - start.y);
+          // Sweep flag chosen so SVG renders the arc passing OPPOSITE
+          // the centre side (matches the stroke render in arcSvgPathD).
+          // Derived in the engine arc helpers; reproduced inline here.
+          const ex = end.x - start.x;
+          const ey = end.y - start.y;
+          const cxv = centre.x - start.x;
+          const cyv = centre.y - start.y;
+          const sweepFlag = ex * cyv - ey * cxv > 0 ? 1 : 0;
+          sub += `A ${r} ${r} 0 0 ${sweepFlag} ${end.x} ${end.y} `;
+        } else {
+          // Straight segment.
+          sub += `L ${end.x} ${end.y} `;
+        }
       }
       return sub + "Z";
     };
