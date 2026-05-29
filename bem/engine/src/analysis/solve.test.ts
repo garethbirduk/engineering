@@ -79,6 +79,62 @@ describe("solve (BEM)", () => {
     expect(Number.isNaN(mesh[0]!.nodes[0]!.ux)).toBe(true);
   });
 
+  it("continuous-node corner BCs are MERGED, not first-wins (bottom uy=0 + right tx=100 → corner uy=0)", () => {
+    // Bug repro: with localNodes = [-1, 0, +1] every edge's η=±1 node
+    // sits AT a corner Point, so adjacent edges' corner mesh nodes
+    // share a world position and get deduped to one global index.
+    // Pre-fix, only the FIRST encountered side's DOFs were kept; the
+    // bottom edge's uy=0 was silently dropped at (6, 0) when the right
+    // edge was iterated first → corner uy ended up non-zero.
+    const model = {
+      points: [
+        { id: "p1", x: 0, y: 0 },
+        { id: "p2", x: 6, y: 0 },
+        { id: "p3", x: 6, y: 4 },
+        { id: "p4", x: 0, y: 4 },
+      ],
+      // Lines deliberately ordered so lR comes BEFORE lB (the order
+      // that triggered the original bug — lR's corner node at (6, 0)
+      // gets registered first, lB's overlapping node was dropped).
+      lines: [
+        { id: "lL", startId: "p4", endId: "p1" },
+        { id: "lT", startId: "p3", endId: "p4" },
+        { id: "lR", startId: "p2", endId: "p3" },
+        { id: "lB", startId: "p1", endId: "p2" },
+      ],
+      bcs: [
+        { lineId: "lL", x: { kind: "displacement" as const, value: 0 } },
+        { lineId: "lB", y: { kind: "displacement" as const, value: 0 } },
+        {
+          lineId: "lR",
+          x: { kind: "traction" as const, value: 100, prefix: 6 },
+        },
+      ],
+      // Continuous nodes everywhere — corner η=±1 nodes coincide.
+      meshing: [
+        { lineId: "lL", localNodes: [-1, 0, 1] as const },
+        { lineId: "lT", localNodes: [-1, 0, 1] as const },
+        { lineId: "lR", localNodes: [-1, 0, 1] as const },
+        { lineId: "lB", localNodes: [-1, 0, 1] as const },
+      ],
+    };
+    const mesh = discretiseLines(model);
+    const solved = solve(mesh);
+
+    // Bottom-right corner (6, 0) must end up with uy = 0 (the merged
+    // BC). Pre-fix this came back as ~5e-4 (non-zero, wrongly free).
+    const cornerNodes: typeof mesh[number]["nodes"][number][] = [];
+    for (const el of solved) {
+      for (const n of el.nodes) {
+        if (Math.abs(n.x - 6) < 1e-6 && Math.abs(n.y) < 1e-6) cornerNodes.push(n);
+      }
+    }
+    expect(cornerNodes.length).toBeGreaterThan(0);
+    for (const n of cornerNodes) {
+      expect(n.uy).toBeCloseTo(0, 8);
+    }
+  });
+
   it("uniaxial tension on a 6×4 plate — right edge stretches by ≈ σL/E", () => {
     // Plate 6 wide × 4 tall, left edge fixed in x, bottom edge fixed in
     // y, right edge pulled with 100 MPa traction in +x, top edge free.

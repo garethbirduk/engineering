@@ -42,9 +42,59 @@ function posKey(n: MeshNode): string {
 }
 
 /**
+ * Merge a coincident node's DOFs into an existing representative. Each
+ * line that meets at a shared (continuous) corner contributes its own
+ * BC fan-out; without merging we'd silently drop the second visitor's
+ * constraints (e.g. bottom edge says uy=0 and right edge says tx=100 —
+ * both must reach the corner).
+ *
+ * Rule per DOF:
+ *   • NaN ∪ known  → known
+ *   • known ∪ known with equal values (within tolerance) → keep
+ *   • known ∪ known with different values → take A's value, warn.
+ *     Real-world cause: applied traction differs on the two faces of a
+ *     corner (genuine physics — properly resolved by double-collocation
+ *     at corners; we don't do that yet).
+ *
+ * After the per-DOF merge, per-AXIS cleanup: if both u and t for the
+ * same axis end up known (e.g. bottom uy=0 + right ty=0 at a corner),
+ * keep displacement, drop traction. The solver requires exactly one
+ * known per axis; the dropped t becomes the corner reaction the solver
+ * computes.
+ */
+function mergeNodes(a: MeshNode, b: MeshNode): MeshNode {
+  let ux = mergeDof(a.ux, b.ux, "u");
+  let uy = mergeDof(a.uy, b.uy, "u");
+  let tx = mergeDof(a.tx, b.tx, "t");
+  let ty = mergeDof(a.ty, b.ty, "t");
+  // Per-axis cleanup — if both u and t known for an axis, displacement
+  // wins and the traction becomes a solve-time unknown (reaction).
+  if (!Number.isNaN(ux) && !Number.isNaN(tx)) tx = NaN;
+  if (!Number.isNaN(uy) && !Number.isNaN(ty)) ty = NaN;
+  return { x: a.x, y: a.y, ux, uy, tx, ty };
+}
+
+function mergeDof(a: number, b: number, kind: "u" | "t"): number {
+  if (Number.isNaN(a)) return b;
+  if (Number.isNaN(b)) return a;
+  if (Math.abs(a - b) < 1e-9 * Math.max(1, Math.abs(a), Math.abs(b))) return a;
+  // Conflict: two different known values at the same position. For
+  // traction this is genuine (different surface normals on the two
+  // faces of a corner). For displacement it's user error. Either way
+  // we proceed with A's value and emit a warning.
+  // eslint-disable-next-line no-console
+  console.warn(
+    `BEM: ${kind} conflict at merged corner — got ${a} and ${b}, using ${a}`,
+  );
+  return a;
+}
+
+/**
  * Walk the mesh once to build the unique-node registry. Continuous
  * (shared) nodes between adjacent elements get a single global index;
- * discontinuous nodes each get their own.
+ * discontinuous nodes each get their own. Coincident-node BCs are
+ * MERGED so a corner where two lines specify complementary constraints
+ * retains both.
  */
 function buildNodeRegistry(mesh: readonly MeshElement[]): {
   nodeIndexByKey: Map<string, number>;
@@ -65,6 +115,9 @@ function buildNodeRegistry(mesh: readonly MeshElement[]): {
         idx = nodesByIndex.length;
         nodeIndexByKey.set(key, idx);
         nodesByIndex.push(node);
+      } else {
+        // Coincident node — merge its DOFs into the existing rep.
+        nodesByIndex[idx] = mergeNodes(nodesByIndex[idx]!, node);
       }
       idxs[k] = idx;
     }
