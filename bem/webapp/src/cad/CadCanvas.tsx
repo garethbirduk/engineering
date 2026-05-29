@@ -210,6 +210,56 @@ export function CadCanvas() {
     return m;
   }, [meshElements]);
 
+  /**
+   * For every (lineId, indexInLine, nodeIdx) triple, is this node's
+   * world position shared with ANOTHER mesh node OR a geometry Point?
+   * Used to render shared nodes as SOLID circles. "Sharing with a Point"
+   * matters because a continuous-scheme node at η=±1 coincides with the
+   * line endpoint — physically the same nodal DOF as the neighbouring
+   * line's endpoint node. Tolerance scales with zoom.
+   */
+  const sharedNodeKeys = useMemo(() => {
+    const tol = view.width * 1e-4;
+    const tol2 = tol * tol;
+    const shared = new Set<string>();
+    const nodeFlat: { key: string; x: number; y: number }[] = [];
+    for (const el of meshElements) {
+      for (let i = 0; i < el.nodes.length; i++) {
+        const n = el.nodes[i]!;
+        nodeFlat.push({
+          key: `${el.lineId}|${el.indexInLine}|${i}`,
+          x: n.x,
+          y: n.y,
+        });
+      }
+    }
+    // Node–node coincidence.
+    for (let i = 0; i < nodeFlat.length; i++) {
+      for (let j = i + 1; j < nodeFlat.length; j++) {
+        const a = nodeFlat[i]!;
+        const b = nodeFlat[j]!;
+        const dx = a.x - b.x;
+        const dy = a.y - b.y;
+        if (dx * dx + dy * dy <= tol2) {
+          shared.add(a.key);
+          shared.add(b.key);
+        }
+      }
+    }
+    // Node–point coincidence (line endpoints).
+    for (const n of nodeFlat) {
+      for (const p of model.points) {
+        const dx = n.x - p.x;
+        const dy = n.y - p.y;
+        if (dx * dx + dy * dy <= tol2) {
+          shared.add(n.key);
+          break;
+        }
+      }
+    }
+    return shared;
+  }, [meshElements, model.points, view.width]);
+
   const makeCtx = useCallback(
     (cursor: Vec2): ClickContext => ({
       cursor,
@@ -823,7 +873,7 @@ export function CadCanvas() {
                     ? "var(--accent)"
                     : inBoundary
                       ? "var(--boundary)"
-                      : "currentColor";
+                      : "var(--geom)";
                   const strokeW = isSelected ? lineStroke * 1.8 : lineStroke;
 
                   // Arc render path. Falls back to straight if the centre
@@ -915,6 +965,37 @@ export function CadCanvas() {
                 })}
               </g>
 
+              {/* Points (geometry layer — render BEFORE mesh + BC glyphs so
+                  those analysis-layer overlays sit visually on top of the
+                  geometry, matching the conceptual stack). */}
+              <g pointerEvents="none">
+                {model.points.map((p) => {
+                  const isSelected = selectedPointIds.has(p.id);
+                  return (
+                    <g key={p.id}>
+                      {isSelected && (
+                        <circle
+                          cx={p.x}
+                          cy={p.y}
+                          r={selectionHaloRadius}
+                          fill="none"
+                          stroke="var(--accent)"
+                          strokeWidth={selectionHaloStroke}
+                        />
+                      )}
+                      <circle
+                        cx={p.x}
+                        cy={p.y}
+                        r={pointRadius}
+                        fill="canvas"
+                        stroke="var(--geom)"
+                        strokeWidth={lineStroke}
+                      />
+                    </g>
+                  );
+                })}
+              </g>
+
               {/* Mesh overlay (toggled). Elements coincide with the parent
                   geometry — same path, just stroked in navy on top — with
                   short perpendicular end ticks bracketing each element and
@@ -996,18 +1077,25 @@ export function CadCanvas() {
                       y: el.end.y + endNormal.y * meshEndTickLen,
                     };
 
-                    // 3 open nodes ON the line at η = -2/3, 0, +2/3.
-                    const nodeCircles = el.nodes.map((node, i) => (
-                      <circle
-                        key={`n${i}`}
-                        cx={node.x}
-                        cy={node.y}
-                        r={meshNodeRadius}
-                        fill="none"
-                        stroke="var(--mesh)"
-                        strokeWidth={meshStroke}
-                      />
-                    ));
+                    // 3 nodes on the line. Hollow by default; filled
+                    // (solid) when the node's world position is shared
+                    // with another element's node — i.e. continuous
+                    // across the element boundary.
+                    const nodeCircles = el.nodes.map((node, i) => {
+                      const key = `${el.lineId}|${el.indexInLine}|${i}`;
+                      const shared = sharedNodeKeys.has(key);
+                      return (
+                        <circle
+                          key={`n${i}`}
+                          cx={node.x}
+                          cy={node.y}
+                          r={meshNodeRadius}
+                          fill={shared ? "var(--mesh)" : "canvas"}
+                          stroke="var(--mesh)"
+                          strokeWidth={meshStroke}
+                        />
+                      );
+                    });
 
                     return [
                       <g key={`${el.lineId}-${el.indexInLine}`}>
@@ -1260,33 +1348,6 @@ export function CadCanvas() {
                     }
                   }
                   return els;
-                })}
-              </g>
-
-              {/* Points. */}
-              <g pointerEvents="none">
-                {model.points.map((p) => {
-                  const isSelected = selectedPointIds.has(p.id);
-                  return (
-                    <g key={p.id}>
-                      {isSelected && (
-                        <circle
-                          cx={p.x}
-                          cy={p.y}
-                          r={selectionHaloRadius}
-                          fill="none"
-                          stroke="var(--accent)"
-                          strokeWidth={selectionHaloStroke}
-                        />
-                      )}
-                      <circle
-                        cx={p.x}
-                        cy={p.y}
-                        r={pointRadius}
-                        fill="currentColor"
-                      />
-                    </g>
-                  );
                 })}
               </g>
 

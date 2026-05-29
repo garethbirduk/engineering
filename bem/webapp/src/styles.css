@@ -8,6 +8,9 @@
   --bc-anchor: #2a9d8f;
   --bc-traction: #e76f51;
   --mesh: #1e3a8a;
+  /* Geometry tint — sits visually "below" the brighter overlays
+     (mesh, BCs, domain fill) so the analysis layers stand out. */
+  --geom: #8a8a8a;
 }
 
 html,
