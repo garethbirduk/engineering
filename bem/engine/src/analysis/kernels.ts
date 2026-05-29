@@ -19,6 +19,14 @@
 // (same E).  The caller picks `effectiveNu` accordingly.
 
 import type { Vec2 } from "../geometry/types.js";
+import {
+  DEFAULT_MATERIAL,
+  type MaterialProperties,
+} from "../material.js";
+
+// Re-exported here so existing `import { MaterialProperties, DEFAULT_MATERIAL }
+// from "./kernels"` paths keep working.
+export { DEFAULT_MATERIAL, type MaterialProperties };
 
 /** A 2×2 block.  Indexed [i][j] = response in direction i to load in direction j. */
 export type Mat2x2 = readonly [
@@ -30,26 +38,6 @@ export interface KelvinKernels {
   readonly U: Mat2x2;
   readonly T: Mat2x2;
 }
-
-/**
- * Material properties for 2D linear elasticity.
- *
- * `planeKind` chooses how the out-of-plane assumption maps Poisson:
- *   "strain" → ν' = ν (long body, no out-of-plane strain)
- *   "stress" → ν' = ν / (1+ν) (thin sheet, no out-of-plane stress)
- */
-export interface MaterialProperties {
-  readonly E: number;
-  readonly nu: number;
-  readonly planeKind: "strain" | "stress";
-}
-
-/** Default: mild steel, plane stress (sensible for a 2D sketch). */
-export const DEFAULT_MATERIAL: MaterialProperties = {
-  E: 200e9,
-  nu: 0.3,
-  planeKind: "stress",
-};
 
 /** Effective Poisson ratio in the plane-strain kernel formulas. */
 export function effectiveNu(material: MaterialProperties): number {

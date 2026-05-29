@@ -168,6 +168,10 @@ export type CanvasAction =
   | {
       readonly type: "setInteriorField";
       readonly field: CanvasState["interiorField"];
+    }
+  | {
+      readonly type: "setMaterial";
+      readonly material: NonNullable<CadModel["material"]>;
     };
 
 export const INITIAL_STATE: CanvasState = {
@@ -266,6 +270,12 @@ export function canvasReducer(
 
     case "setInteriorField":
       return { ...state, interiorField: action.field };
+
+    case "setMaterial":
+      return {
+        ...state,
+        model: { ...state.model, material: action.material },
+      };
 
     case "cancel":
       if (

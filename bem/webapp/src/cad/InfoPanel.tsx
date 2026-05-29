@@ -5,8 +5,14 @@
 // More than one selected  → summary with counts by kind.
 
 import { useEffect, useRef, useState } from "react";
-import type { CadModel, DirectionBc, Id, LineDiscretisation } from "@bem/engine";
-import { shapeFunctions } from "@bem/engine";
+import type {
+  CadModel,
+  DirectionBc,
+  Id,
+  LineDiscretisation,
+  MaterialProperties,
+} from "@bem/engine";
+import { resolveMaterial, shapeFunctions } from "@bem/engine";
 import {
   DEFAULT_ELEMENTS_PER_LINE,
   DEFAULT_LOCAL_NODES,
@@ -58,7 +64,7 @@ function renderBody(
   selection: readonly SelectionItem[],
   onDispatch: (action: CanvasAction) => void,
 ) {
-  if (selection.length === 0) return <Empty />;
+  if (selection.length === 0) return <Empty model={model} onDispatch={onDispatch} />;
 
   if (selection.length === 1) {
     const item = selection[0]!;
@@ -87,10 +93,17 @@ function renderBody(
 
 // ── empty / hint ─────────────────────────────────────────────────────────
 
-function Empty() {
+function Empty({
+  model,
+  onDispatch,
+}: {
+  model: CadModel;
+  onDispatch: (a: CanvasAction) => void;
+}) {
   return (
     <div className="cad-info-empty">
       <p>Nothing selected.</p>
+      <MaterialEditor model={model} onDispatch={onDispatch} />
       <ul className="cad-hint">
         <li>
           <kbd>dbl-click</kbd> empty space → add a Point
@@ -117,6 +130,210 @@ function Empty() {
           <kbd>shift</kbd>+drag → pan · <kbd>wheel</kbd> → zoom
         </li>
       </ul>
+    </div>
+  );
+}
+
+// ── material editor (visible when nothing selected) ──────────────────────
+
+function MaterialEditor({
+  model,
+  onDispatch,
+}: {
+  model: CadModel;
+  onDispatch: (a: CanvasAction) => void;
+}) {
+  const mat = resolveMaterial(model);
+  const ePrefix = mat.EPrefix ?? 9;
+  const eDisplay = mat.E / Math.pow(10, ePrefix);
+  const ePrefixIdx = SI_PREFIXES.findIndex((p) => p.power === ePrefix);
+  const ePrefixEntry =
+    ePrefixIdx < 0 ? SI_PREFIXES.find((p) => p.power === 9)! : SI_PREFIXES[ePrefixIdx]!;
+
+  const writeMat = (next: MaterialProperties) =>
+    onDispatch({ type: "setMaterial", material: next });
+
+  const setE = (displayValue: number, prefixPower: number) => {
+    if (!Number.isFinite(displayValue)) return;
+    writeMat({
+      ...mat,
+      E: displayValue * Math.pow(10, prefixPower),
+      EPrefix: prefixPower,
+    });
+  };
+
+  const stepEPrefix = (direction: 1 | -1) => {
+    const cur = SI_PREFIXES.findIndex((p) => p.power === ePrefixEntry.power);
+    const next = direction === 1 ? cur - 1 : cur + 1;
+    if (next < 0 || next >= SI_PREFIXES.length) return;
+    // Physical E unchanged; only the display hint moves. The input box
+    // re-derives its value as E / 10^prefix on the next render.
+    writeMat({ ...mat, EPrefix: SI_PREFIXES[next]!.power });
+  };
+
+  const setNu = (v: number) => {
+    if (!Number.isFinite(v)) return;
+    const clamped = Math.max(0, Math.min(0.4999, v));
+    writeMat({ ...mat, nu: clamped });
+  };
+
+  const setPlaneKind = (kind: "stress" | "strain") => {
+    writeMat({ ...mat, planeKind: kind });
+  };
+
+  return (
+    <div className="cad-bc-section">
+      <div className="cad-bc-title">Material</div>
+      {/* Young's modulus */}
+      <div className="cad-bc-row">
+        <span className="cad-bc-axis">E</span>
+        <span className="cad-bc-value-wrap">
+          <input
+            type="number"
+            className="cad-bc-value"
+            value={formatBcValue(eDisplay)}
+            step="any"
+            onChange={(e) => setE(parseFloat(e.target.value), ePrefix)}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setE(eDisplay + 1, ePrefix);
+              } else if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setE(eDisplay - 1, ePrefix);
+              }
+            }}
+          />
+          <span className="cad-mesh-spin">
+            <button
+              type="button"
+              className="cad-mesh-spin-btn"
+              onClick={() => setE(eDisplay + 1, ePrefix)}
+              tabIndex={-1}
+              title="Increment by 1"
+              aria-label="Increment"
+            >
+              ▲
+            </button>
+            <button
+              type="button"
+              className="cad-mesh-spin-btn"
+              onClick={() => setE(eDisplay - 1, ePrefix)}
+              tabIndex={-1}
+              title="Decrement by 1"
+              aria-label="Decrement"
+            >
+              ▼
+            </button>
+          </span>
+        </span>
+        <span className="cad-bc-unit">
+          <span className="cad-bc-prefix-control">
+            <span
+              className="cad-bc-prefix"
+              aria-label={`SI prefix ${ePrefixEntry.symbol || "(none)"}`}
+            >
+              {ePrefixEntry.symbol || "·"}
+            </span>
+            <span className="cad-mesh-spin">
+              <button
+                type="button"
+                className="cad-mesh-spin-btn"
+                onClick={() => stepEPrefix(1)}
+                tabIndex={-1}
+                aria-label="Bigger prefix"
+                title="Bigger prefix (×1000)"
+                disabled={ePrefixIdx === 0}
+              >
+                ▲
+              </button>
+              <button
+                type="button"
+                className="cad-mesh-spin-btn"
+                onClick={() => stepEPrefix(-1)}
+                tabIndex={-1}
+                aria-label="Smaller prefix"
+                title="Smaller prefix (÷1000)"
+                disabled={ePrefixIdx === SI_PREFIXES.length - 1}
+              >
+                ▼
+              </button>
+            </span>
+          </span>
+          <span className="cad-bc-base">Pa</span>
+        </span>
+      </div>
+      {/* Poisson's ratio */}
+      <div className="cad-bc-row">
+        <span className="cad-bc-axis">ν</span>
+        <span className="cad-bc-value-wrap">
+          <input
+            type="number"
+            className="cad-bc-value"
+            value={formatBcValue(mat.nu)}
+            step="0.01"
+            min={0}
+            max={0.4999}
+            onChange={(e) => setNu(parseFloat(e.target.value))}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setNu(mat.nu + 0.01);
+              } else if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setNu(mat.nu - 0.01);
+              }
+            }}
+          />
+          <span className="cad-mesh-spin">
+            <button
+              type="button"
+              className="cad-mesh-spin-btn"
+              onClick={() => setNu(mat.nu + 0.01)}
+              tabIndex={-1}
+              title="Increment by 0.01"
+              aria-label="Increment"
+            >
+              ▲
+            </button>
+            <button
+              type="button"
+              className="cad-mesh-spin-btn"
+              onClick={() => setNu(mat.nu - 0.01)}
+              tabIndex={-1}
+              title="Decrement by 0.01"
+              aria-label="Decrement"
+            >
+              ▼
+            </button>
+          </span>
+        </span>
+        <span className="cad-bc-unit">
+          <span className="cad-bc-base">—</span>
+        </span>
+      </div>
+      {/* Plane kind */}
+      <div className="cad-bc-row">
+        <span className="cad-bc-axis">2D</span>
+        <label className="cad-bc-radio">
+          <input
+            type="radio"
+            name="plane-kind"
+            checked={mat.planeKind === "stress"}
+            onChange={() => setPlaneKind("stress")}
+          />
+          stress
+        </label>
+        <label className="cad-bc-radio">
+          <input
+            type="radio"
+            name="plane-kind"
+            checked={mat.planeKind === "strain"}
+            onChange={() => setPlaneKind("strain")}
+          />
+          strain
+        </label>
+      </div>
     </div>
   );
 }

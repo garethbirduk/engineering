@@ -174,7 +174,8 @@ describe("solve (BEM)", () => {
       ],
     };
     const mesh = discretiseLines(model);
-    const solved = solve(mesh);
+    // Pin material to the values the analytical solution was derived with.
+    const solved = solve(mesh, { E: 200e9, nu: 0.3, planeKind: "stress" });
 
     // Pluck the right-edge nodes (x ≈ 6) and verify ux ≈ 3e-3 m.
     const rightNodes: number[] = [];

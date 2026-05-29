@@ -29,15 +29,16 @@ import {
 import {
   arcPoint,
   arcSvgPathD,
-  DEFAULT_MATERIAL,
   discretiseLines,
   interiorDisplacement,
   interiorStress,
   loopOrientation,
+  resolveMaterial,
   shapeFunctions,
   shapeFunctionDerivatives,
   solve,
   STANDARD_NODES,
+  type MaterialProperties,
   type MeshElement,
   type StressTriple,
   type Vec2,
@@ -279,9 +280,20 @@ export function CadCanvas() {
     return m;
   }, [meshElements]);
 
+  // Resolved per-project material (fallback to DEFAULT_MATERIAL when
+  // the model has no override). Used by the solver AND by the interior
+  // displacement / stress evaluators so the picture stays self-consistent.
+  const material: MaterialProperties = useMemo(
+    () => resolveMaterial(model),
+    [model],
+  );
+
   // Solve. Memoised — runs synchronously on every model change (cheap in
   // 2D for the stub). Real BEM kernel drops in behind the same signature.
-  const solvedMesh = useMemo(() => solve(meshElements), [meshElements]);
+  const solvedMesh = useMemo(
+    () => solve(meshElements, material),
+    [meshElements, material],
+  );
 
   /**
    * Auto-scale factor for the deformed-shape overlay. We multiply each node's
@@ -494,11 +506,11 @@ export function CadCanvas() {
       out[i] = interiorStress(
         internalTriangles.points[i]!,
         solvedMesh,
-        DEFAULT_MATERIAL,
+        material,
       );
     }
     return out;
-  }, [stressActive, internalTriangles, solvedMesh]);
+  }, [stressActive, internalTriangles, solvedMesh, material]);
 
   /** Active interior field values at every triangulation vertex.
    *  Displacement fields: BEM-node coincident points use the solved
@@ -541,7 +553,7 @@ export function CadCanvas() {
           out[i] = known;
         } else {
           out[i] = pickInterior(
-            interiorDisplacement(p, solvedMesh, DEFAULT_MATERIAL),
+            interiorDisplacement(p, solvedMesh, material),
           );
         }
       }
@@ -552,8 +564,8 @@ export function CadCanvas() {
 
     // Plane-strain out-of-plane stress used by the von Mises formula —
     // zero for plane-stress, ν(σxx+σyy) for plane-strain.
-    const planeStrain = DEFAULT_MATERIAL.planeKind === "strain";
-    const nu = DEFAULT_MATERIAL.nu;
+    const planeStrain = material.planeKind === "strain";
+    const nu = material.nu;
     const out: number[] = new Array(N);
     for (let i = 0; i < N; i++) {
       const { sxx, syy, sxy } = interiorStresses[i]!;
@@ -598,7 +610,7 @@ export function CadCanvas() {
       out[i] = Number.isFinite(v) ? v : 0;
     }
     return out;
-  }, [internalTriangles, solvedMesh, interiorField, interiorStresses]);
+  }, [internalTriangles, solvedMesh, interiorField, interiorStresses, material]);
 
   /** Actual min, max + symmetric range (max |v|) of the active field. */
   const interiorFieldStats: FieldStats | null = useMemo(() => {

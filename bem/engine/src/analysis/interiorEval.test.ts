@@ -39,14 +39,12 @@ describe("interiorDisplacement (Somigliana)", () => {
       ],
     };
     const mesh = discretiseLines(model);
-    const solved = solve(mesh);
+    // Same material the analytical strain field was derived with.
+    const material = { E: 200e9, nu: 0.3, planeKind: "stress" as const };
+    const solved = solve(mesh, material);
     // Pick a point comfortably inside the plate (not near any boundary).
     const p = { x: 3, y: 2 };
-    const u = interiorDisplacement(p, solved, {
-      E: 200e9,
-      nu: 0.3,
-      planeKind: "stress",
-    });
+    const u = interiorDisplacement(p, solved, material);
     // Analytical: u_x = 5e-4 · 3 = 1.5e-3, u_y = -1.5e-4 · 2 = -3e-4
     expect(u.x).toBeCloseTo(1.5e-3, 5);
     expect(u.y).toBeCloseTo(-3e-4, 6);

@@ -140,6 +140,10 @@ export interface LineDiscretisation {
 
 // ── whole model ──────────────────────────────────────────────────────────
 
+// Imported here (not from analysis/kernels.js) so the geometry layer
+// doesn't pull on the analysis layer.
+import type { MaterialProperties } from "../material.js";
+
 export interface CadModel {
   readonly points: readonly Point[];
   readonly lines: readonly Line[];
@@ -149,4 +153,7 @@ export interface CadModel {
   readonly bcs: readonly BcAssignment[];
   /** Sparse — only Lines with non-default discretisation appear. */
   readonly meshing: readonly LineDiscretisation[];
+  /** Per-project material. Optional for backwards compatibility with
+   *  older saves; resolve via `resolveMaterial(model)`. */
+  readonly material?: MaterialProperties;
 }
