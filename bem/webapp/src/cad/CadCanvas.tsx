@@ -29,7 +29,9 @@ import {
 import {
   arcPoint,
   arcSvgPathD,
+  DEFAULT_MATERIAL,
   discretiseLines,
+  interiorDisplacement,
   loopOrientation,
   shapeFunctions,
   shapeFunctionDerivatives,
@@ -172,6 +174,27 @@ function pointInPolygon(p: Vec2, poly: readonly Vec2[]): boolean {
   return inside;
 }
 
+/** Diverging blue → green → red colour scale, t ∈ [-1, +1].
+ *  t = -1 → deep blue, t = 0 → green, t = +1 → red. Clamped. */
+function divergingUxColor(t: number): string {
+  const x = Math.max(-1, Math.min(1, t));
+  // Two-stop blend: blue→green for x∈[-1,0], green→red for x∈[0,1].
+  const BLUE: [number, number, number] = [40, 90, 210];
+  const GREEN: [number, number, number] = [40, 170, 90];
+  const RED: [number, number, number] = [220, 60, 50];
+  const mix = (
+    a: [number, number, number],
+    b: [number, number, number],
+    f: number,
+  ): string => {
+    const r = Math.round(a[0] + (b[0] - a[0]) * f);
+    const g = Math.round(a[1] + (b[1] - a[1]) * f);
+    const bch = Math.round(a[2] + (b[2] - a[2]) * f);
+    return `rgb(${r},${g},${bch})`;
+  };
+  return x < 0 ? mix(BLUE, GREEN, x + 1) : mix(GREEN, RED, x);
+}
+
 /** Squared distance from point `p` to the polyline made of `poly`'s
  *  segments (closed: edge wraps from last → first). */
 function minSqDistToPolygonEdges(p: Vec2, poly: readonly Vec2[]): number {
@@ -215,6 +238,7 @@ export function CadCanvas() {
     meshVisible,
     resultsVisible,
     internalNodesVisible,
+    interiorResultsVisible,
   } = state;
 
   // Reducer is pure but startDragForHit composes selection + dragSession;
@@ -458,6 +482,51 @@ export function CadCanvas() {
     }
     return { points: pts, triangles: tris };
   }, [meshElements, model.points, internalNodes, boundaryPolygons]);
+
+  /** ux at every triangulation vertex. Points whose position matches a
+   *  solved BEM node (within POS_EPS) take that node's ux directly;
+   *  others go through Somigliana via `interiorDisplacement` against the
+   *  solved boundary. Returns null when triangulation or solve missing. */
+  const interiorFieldValues: readonly number[] | null = useMemo(() => {
+    if (!internalTriangles || solvedMesh.length === 0) return null;
+    const POS_EPS = 1e-6;
+    const bemByKey = new Map<string, number>();
+    const ptKey = (x: number, y: number) =>
+      `${Math.round(x / POS_EPS)}|${Math.round(y / POS_EPS)}`;
+    for (const el of solvedMesh) {
+      for (const n of el.nodes) {
+        if (Number.isFinite(n.ux)) bemByKey.set(ptKey(n.x, n.y), n.ux);
+      }
+    }
+    const out: number[] = new Array(internalTriangles.points.length);
+    for (let i = 0; i < internalTriangles.points.length; i++) {
+      const p = internalTriangles.points[i]!;
+      const known = bemByKey.get(ptKey(p.x, p.y));
+      if (known !== undefined) {
+        out[i] = known;
+      } else {
+        const u = interiorDisplacement(p, solvedMesh, DEFAULT_MATERIAL);
+        out[i] = u.x;
+      }
+    }
+    return out;
+  }, [internalTriangles, solvedMesh]);
+
+  /** Symmetric range for the diverging colour scale (max |ux|). Returns
+   *  null when there's nothing to colour. */
+  const interiorFieldRange: number | null = useMemo(() => {
+    if (!interiorFieldValues) return null;
+    let v = 0;
+    for (const x of interiorFieldValues) {
+      if (Number.isFinite(x) && Math.abs(x) > v) v = Math.abs(x);
+    }
+    return v > 0 ? v : null;
+  }, [interiorFieldValues]);
+
+  const canShowInteriorResults =
+    !!internalTriangles &&
+    internalTriangles.triangles.length > 0 &&
+    interiorFieldRange !== null;
 
   /**
    * For every (lineId, indexInLine, nodeIdx) triple, is this node's
@@ -1097,12 +1166,17 @@ export function CadCanvas() {
         canShowResults={canShowResults}
         internalNodesVisible={internalNodesVisible}
         canShowInternalNodes={canShowInternalNodes}
+        interiorResultsVisible={interiorResultsVisible}
+        canShowInteriorResults={canShowInteriorResults}
         selectionSummary={selectionSummary}
         onCreateDomain={() => dispatch({ type: "createDomainFromSelection" })}
         onDelete={() => dispatch({ type: "deleteSelection" })}
         onToggleMesh={() => dispatch({ type: "toggleMesh" })}
         onToggleResults={() => dispatch({ type: "toggleResults" })}
         onToggleInternalNodes={() => dispatch({ type: "toggleInternalNodes" })}
+        onToggleInteriorResults={() =>
+          dispatch({ type: "toggleInteriorResults" })
+        }
         onSave={handleSave}
         onLoad={handleLoad}
         onNew={handleNew}
@@ -1137,6 +1211,88 @@ export function CadCanvas() {
                   pointerEvents="none"
                 />
               ))}
+
+              {/* Interior ux contour fill. Each Delaunay triangle is
+                  subdivided into N² flat-colour sub-triangles so the
+                  linear field varies visibly across the parent T3.
+                  Red = max +ve ux, blue = max -ve, green = 0. Gated
+                  independently of the wireframe — fills can sit alone
+                  or under the wireframe. */}
+              {interiorResultsVisible &&
+                interiorFieldValues &&
+                interiorFieldRange !== null &&
+                internalTriangles && (() => {
+                  const range = interiorFieldRange;
+                  const N = 4;
+                  const polys: React.ReactElement[] = [];
+                  // Hairline seal stroke matching fill — kills the
+                  // sub-pixel gap between flat-colour neighbours.
+                  const seal = view.width * 0.0006;
+                  internalTriangles.triangles.forEach((tri, ti) => {
+                    const pA = internalTriangles.points[tri.a]!;
+                    const pB = internalTriangles.points[tri.b]!;
+                    const pC = internalTriangles.points[tri.c]!;
+                    const vA = interiorFieldValues[tri.a]!;
+                    const vB = interiorFieldValues[tri.b]!;
+                    const vC = interiorFieldValues[tri.c]!;
+                    // Position + value at barycentric (a,b,c).
+                    const at = (
+                      a: number,
+                      b: number,
+                      c: number,
+                    ): { x: number; y: number; v: number } => ({
+                      x: a * pA.x + b * pB.x + c * pC.x,
+                      y: a * pA.y + b * pB.y + c * pC.y,
+                      v: a * vA + b * vB + c * vC,
+                    });
+                    // (i,j) indexes the lattice; k = N - i - j.
+                    // Upward sub-tri: (i,j), (i+1,j), (i,j+1).
+                    // Downward sub-tri: (i+1,j), (i+1,j+1), (i,j+1).
+                    for (let i = 0; i < N; i++) {
+                      for (let j = 0; j < N - i; j++) {
+                        const p1 = at(i / N, j / N, (N - i - j) / N);
+                        const p2 = at((i + 1) / N, j / N, (N - i - j - 1) / N);
+                        const p3 = at(i / N, (j + 1) / N, (N - i - j - 1) / N);
+                        const cv = (p1.v + p2.v + p3.v) / 3 / range;
+                        const fill = divergingUxColor(cv);
+                        polys.push(
+                          <polygon
+                            key={`up-${ti}-${i}-${j}`}
+                            points={`${p1.x},${p1.y} ${p2.x},${p2.y} ${p3.x},${p3.y}`}
+                            fill={fill}
+                            stroke={fill}
+                            strokeWidth={seal}
+                          />,
+                        );
+                        if (i + j < N - 1) {
+                          const q1 = p2;
+                          const q2 = at(
+                            (i + 1) / N,
+                            (j + 1) / N,
+                            (N - i - j - 2) / N,
+                          );
+                          const q3 = p3;
+                          const cvd = (q1.v + q2.v + q3.v) / 3 / range;
+                          const fillD = divergingUxColor(cvd);
+                          polys.push(
+                            <polygon
+                              key={`dn-${ti}-${i}-${j}`}
+                              points={`${q1.x},${q1.y} ${q2.x},${q2.y} ${q3.x},${q3.y}`}
+                              fill={fillD}
+                              stroke={fillD}
+                              strokeWidth={seal}
+                            />,
+                          );
+                        }
+                      }
+                    }
+                  });
+                  return (
+                    <g pointerEvents="none" opacity={0.85}>
+                      {polys}
+                    </g>
+                  );
+                })()}
 
               {/* Internal post-process mesh: triangle wireframe + node
                   dots. Triangulation is unconstrained Delaunay over
