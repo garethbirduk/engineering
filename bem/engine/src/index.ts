@@ -6,7 +6,6 @@ export * from "./geometry/index.js";
 export * from "./elements/index.js";
 export * from "./numerics/index.js";
 export * from "./analysis/index.js";
-export * from "./post/index.js";
 export * from "./serialize.js";
 
 export const ENGINE_VERSION = "0.0.1" as const;

@@ -82,10 +82,9 @@ export interface CanvasState {
   readonly meshVisible: boolean;
   /** When true, render the dashed deformed-shape overlay from solve(). */
   readonly resultsVisible: boolean;
-  /** When true, draw the interior T6 triangulation as a wireframe. */
-  readonly internalMeshVisible: boolean;
-  /** When true, fill the triangulation with the field-contour colormap. */
-  readonly contourVisible: boolean;
+  /** When true, draw the interior post-process nodes (corners of the
+   *  future triangulation). Currently shows nothing — placeholder. */
+  readonly internalNodesVisible: boolean;
 }
 
 /** Geometric parameters needed to interpret a click/double-click. */
@@ -147,8 +146,7 @@ export type CanvasAction =
   | { readonly type: "cancel" }
   | { readonly type: "toggleMesh" }
   | { readonly type: "toggleResults" }
-  | { readonly type: "toggleInternalMesh" }
-  | { readonly type: "toggleContour" };
+  | { readonly type: "toggleInternalNodes" };
 
 export const INITIAL_STATE: CanvasState = {
   model: { points: [], lines: [], boundaries: [], domains: [], bcs: [], meshing: [] },
@@ -157,8 +155,7 @@ export const INITIAL_STATE: CanvasState = {
   newLineDraft: null,
   meshVisible: false,
   resultsVisible: false,
-  internalMeshVisible: false,
-  contourVisible: false,
+  internalNodesVisible: false,
 };
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -241,11 +238,8 @@ export function canvasReducer(
     case "toggleResults":
       return { ...state, resultsVisible: !state.resultsVisible };
 
-    case "toggleInternalMesh":
-      return { ...state, internalMeshVisible: !state.internalMeshVisible };
-
-    case "toggleContour":
-      return { ...state, contourVisible: !state.contourVisible };
+    case "toggleInternalNodes":
+      return { ...state, internalNodesVisible: !state.internalNodesVisible };
 
     case "cancel":
       if (

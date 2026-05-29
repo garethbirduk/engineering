@@ -10,16 +10,14 @@ interface ToolbarProps {
   readonly meshVisible: boolean;
   readonly resultsVisible: boolean;
   readonly canShowResults: boolean;
-  readonly internalMeshVisible: boolean;
-  readonly contourVisible: boolean;
-  readonly canShowContour: boolean;
+  readonly internalNodesVisible: boolean;
+  readonly canShowInternalNodes: boolean;
   readonly selectionSummary: string;
   readonly onCreateDomain: () => void;
   readonly onDelete: () => void;
   readonly onToggleMesh: () => void;
   readonly onToggleResults: () => void;
-  readonly onToggleInternalMesh: () => void;
-  readonly onToggleContour: () => void;
+  readonly onToggleInternalNodes: () => void;
   readonly onSave: () => void;
   readonly onLoad: () => void;
   readonly onNew: () => void;
@@ -31,16 +29,14 @@ export function Toolbar({
   meshVisible,
   resultsVisible,
   canShowResults,
-  internalMeshVisible,
-  contourVisible,
-  canShowContour,
+  internalNodesVisible,
+  canShowInternalNodes,
   selectionSummary,
   onCreateDomain,
   onDelete,
   onToggleMesh,
   onToggleResults,
-  onToggleInternalMesh,
-  onToggleContour,
+  onToggleInternalNodes,
   onSave,
   onLoad,
   onNew,
@@ -99,31 +95,17 @@ export function Toolbar({
       </button>
       <button
         type="button"
-        className={`cad-tool ${internalMeshVisible ? "cad-tool--active" : ""}`}
-        onClick={onToggleInternalMesh}
-        aria-pressed={internalMeshVisible}
-        disabled={!canShowContour}
+        className={`cad-tool ${internalNodesVisible ? "cad-tool--active" : ""}`}
+        onClick={onToggleInternalNodes}
+        aria-pressed={internalNodesVisible}
+        disabled={!canShowInternalNodes}
         title={
-          canShowContour
-            ? "Show / hide the interior T6 post-processing mesh"
+          canShowInternalNodes
+            ? "Show / hide interior post-process nodes"
             : "Need a domain to enable"
         }
       >
-        Internal mesh
-      </button>
-      <button
-        type="button"
-        className={`cad-tool ${contourVisible ? "cad-tool--active" : ""}`}
-        onClick={onToggleContour}
-        aria-pressed={contourVisible}
-        disabled={!canShowContour || !canShowResults}
-        title={
-          canShowContour && canShowResults
-            ? "Show / hide the u_x field contour fill"
-            : "Need a domain + valid BCs to enable"
-        }
-      >
-        Field contour
+        Internal nodes
       </button>
       <div className="cad-toolgroup-sep" aria-hidden="true" />
       <div className="cad-toolgroup" aria-label="File">
