@@ -321,6 +321,12 @@ body,
   border-top: 1px dashed color-mix(in srgb, currentColor 18%, transparent);
 }
 
+.cad-bc-section:first-child {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: none;
+}
+
 .cad-bc-title {
   font-size: 0.78rem;
   text-transform: uppercase;
@@ -331,12 +337,33 @@ body,
 }
 
 .cad-bc-row {
-  display: grid;
-  grid-template-columns: 1.2rem auto auto 1fr 2rem;
+  display: flex;
   align-items: center;
-  gap: 0.35rem;
+  gap: 0.5rem;
   font-size: 0.85rem;
   padding: 0.15rem 0;
+}
+
+/* BC value input + its own ▲▼ spinners as a single fixed-width widget.
+   The unit composite is pushed to the far right of the row via
+   margin-left:auto, leaving obvious empty space between value and unit. */
+.cad-bc-value-wrap {
+  display: inline-flex;
+  align-items: stretch;
+  gap: 2px;
+  flex: 0 0 auto;
+}
+
+.cad-bc-value-wrap > .cad-bc-value {
+  width: 4.5rem;
+}
+
+.cad-bc-row > .cad-bc-unit {
+  margin-left: auto;
+}
+
+.cad-bc-row > .cad-bc-axis {
+  min-width: 1.2rem;
 }
 
 .cad-bc-axis {
@@ -360,19 +387,59 @@ body,
   font: inherit;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 0.82rem;
-  text-align: right;
-  padding: 0.15rem 0.35rem;
+  text-align: left;
+  padding: 0.15rem 0.45rem;
   border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
   border-radius: 0.25rem;
   background: canvas;
   color: inherit;
   min-width: 0;
   width: 100%;
+  appearance: textfield;
+  -moz-appearance: textfield;
+}
+.cad-bc-value::-webkit-outer-spin-button,
+.cad-bc-value::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
 }
 
 .cad-bc-unit {
-  font-size: 0.75rem;
-  opacity: 0.6;
+  font-size: 0.78rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.15rem;
+  white-space: nowrap;
+}
+
+/* Prefix glyph + its ▲▼ spinners as one tight widget. Centred so the
+   arrows visually flank the prefix letter rather than the input. */
+.cad-bc-prefix-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.1rem;
+}
+
+.cad-bc-prefix {
+  display: inline-block;
+  min-width: 0.6ch;
+  text-align: right;
+  opacity: 0.85;
+}
+
+.cad-bc-base {
+  opacity: 0.65;
+}
+
+.cad-bc-unit .cad-mesh-spin {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 1px;
+}
+
+.cad-mesh-spin-btn:disabled {
+  opacity: 0.25;
+  cursor: not-allowed;
 }
 
 .cad-bc-reset {
@@ -420,6 +487,58 @@ body,
 
 .cad-mesh-eta {
   width: 100%;
+}
+
+/* Input + custom spinner buttons for snap-stepping. The spinners live
+   OUTSIDE the input box (with a small visual gap) rather than being
+   joined to it, so the input itself isn't crowded by the buttons. */
+.cad-mesh-eta-wrap {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: stretch;
+  gap: 0.2rem;
+}
+
+/* Hide native number-input spinners so we can show our own that step
+   through the snap targets (which include irregular values like ±1/3
+   that a fixed `step` attribute can't express). */
+.cad-mesh-eta-wrap .cad-mesh-eta {
+  appearance: textfield;
+  -moz-appearance: textfield;
+  text-align: right;
+}
+.cad-mesh-eta-wrap .cad-mesh-eta::-webkit-outer-spin-button,
+.cad-mesh-eta-wrap .cad-mesh-eta::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+.cad-mesh-spin {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 1px;
+}
+
+.cad-mesh-spin-btn {
+  font: inherit;
+  font-size: 0.55rem;
+  line-height: 1;
+  padding: 0 0.2rem;
+  border: 1px solid color-mix(in srgb, currentColor 25%, transparent);
+  border-radius: 0.2rem;
+  background: canvas;
+  color: inherit;
+  cursor: pointer;
+  min-width: 0.85rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.7;
+}
+
+.cad-mesh-spin-btn:hover {
+  opacity: 1;
+  background: color-mix(in srgb, currentColor 8%, canvas);
 }
 
 .cad-mesh-plot {

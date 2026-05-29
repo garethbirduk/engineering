@@ -226,12 +226,47 @@ function LineInfo({
   ) => onDispatch({ type: "setLineMeshing", lineId, value: next });
   return (
     <>
-      <dl className="cad-info-dl">
-        <Term label="Kind">{l.arcCentreId ? "Arc" : "Line"}</Term>
-        <Term label="From">{start ? coords(start) : "(missing)"}</Term>
-        <Term label="To">{end ? coords(end) : "(missing)"}</Term>
-        {arcCentre && <Term label="Arc centre">{coords(arcCentre)}</Term>}
-      </dl>
+      <div className="cad-bc-section">
+        <div className="cad-bc-title">Geometry</div>
+        <dl className="cad-info-dl">
+          <Term label="Kind">{l.arcCentreId ? "Arc" : "Line"}</Term>
+          <Term label="From">{start ? coords(start) : "(missing)"}</Term>
+          <Term label="To">{end ? coords(end) : "(missing)"}</Term>
+          {arcCentre && <Term label="Arc centre">{coords(arcCentre)}</Term>}
+        </dl>
+        <div className="cad-info-actions">
+          <button
+            type="button"
+            className="cad-info-btn"
+            onClick={() => onDispatch({ type: "flipSelectedLines" })}
+            title="Swap start ↔ end; outward normal flips to the other side (F)"
+          >
+            Flip outward normal
+            <kbd>F</kbd>
+          </button>
+          {!l.arcCentreId ? (
+            <button
+              type="button"
+              className="cad-info-btn"
+              onClick={() =>
+                onDispatch({ type: "convertLineToArc", lineId })
+              }
+              title="Make this a 90° arc; centre point goes on the outward-normal side"
+            >
+              Convert to arc
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="cad-info-btn"
+              onClick={() => onDispatch({ type: "flipArcCentre", lineId })}
+              title="Mirror the arc centre across the chord — the arc bulges to the other side"
+            >
+              Flip arc
+            </button>
+          )}
+        </div>
+      </div>
       <div className="cad-bc-section">
         <div className="cad-bc-title">Boundary conditions</div>
         <BcEditor
@@ -246,38 +281,6 @@ function LineInfo({
         />
       </div>
       <MeshingEditor meshing={meshing} onChange={setMeshing} />
-      <div className="cad-info-actions">
-        <button
-          type="button"
-          className="cad-info-btn"
-          onClick={() => onDispatch({ type: "flipSelectedLines" })}
-          title="Swap start ↔ end; outward normal flips to the other side (F)"
-        >
-          Flip direction
-          <kbd>F</kbd>
-        </button>
-        {!l.arcCentreId ? (
-          <button
-            type="button"
-            className="cad-info-btn"
-            onClick={() =>
-              onDispatch({ type: "convertLineToArc", lineId })
-            }
-            title="Make this a 90° arc; centre point goes on the outward-normal side"
-          >
-            Convert to arc
-          </button>
-        ) : (
-          <button
-            type="button"
-            className="cad-info-btn"
-            onClick={() => onDispatch({ type: "flipArcCentre", lineId })}
-            title="Mirror the arc centre across the chord — the arc bulges to the other side"
-          >
-            Flip arc
-          </button>
-        )}
-      </div>
     </>
   );
 }
@@ -385,6 +388,66 @@ const ORDER_EPS = 1e-6;
  * updated triple. If the neighbours are too close to leave any room, returns
  * the original.
  */
+/**
+ * Snap-step node `k` to the next/previous SNAP_TARGETS value that's
+ * strictly above (direction +1) or below (-1) its current η, and still
+ * inside [-1, +1] and its neighbours. Returns the updated triple, or
+ * the original if there's no valid step.
+ */
+function stepNode(
+  nodes: readonly [number, number, number],
+  k: 0 | 1 | 2,
+  direction: 1 | -1,
+): readonly [number, number, number] {
+  let lo = -1;
+  let hi = 1;
+  if (k > 0) lo = nodes[k - 1]! + ORDER_EPS;
+  if (k < 2) hi = nodes[k + 1]! - ORDER_EPS;
+  const cur = nodes[k]!;
+  let target: number | null = null;
+  if (direction === 1) {
+    for (const t of SNAP_TARGETS) {
+      if (t <= cur + ORDER_EPS) continue;
+      if (t > hi) break;
+      target = t;
+      break;
+    }
+  } else {
+    for (let i = SNAP_TARGETS.length - 1; i >= 0; i--) {
+      const t = SNAP_TARGETS[i]!;
+      if (t >= cur - ORDER_EPS) continue;
+      if (t < lo) break;
+      target = t;
+      break;
+    }
+  }
+  if (target === null) return nodes;
+  const next: [number, number, number] = [nodes[0]!, nodes[1]!, nodes[2]!];
+  next[k] = target;
+  return next;
+}
+
+/**
+ * Clamp `target` to [-1, +1] AND inside its neighbours' bounds. Used for
+ * typed values (no snap — typing is the escape hatch for arbitrary precision).
+ */
+function clampNode(
+  nodes: readonly [number, number, number],
+  k: 0 | 1 | 2,
+  target: number,
+): readonly [number, number, number] {
+  let lo = -1;
+  let hi = 1;
+  if (k > 0) lo = nodes[k - 1]! + ORDER_EPS;
+  if (k < 2) hi = nodes[k + 1]! - ORDER_EPS;
+  if (lo > hi) return nodes;
+  const clamped = Math.max(lo, Math.min(hi, target));
+  if (clamped === nodes[k]) return nodes;
+  const next: [number, number, number] = [nodes[0]!, nodes[1]!, nodes[2]!];
+  next[k] = clamped;
+  return next;
+}
+
 function dragNode(
   nodes: readonly [number, number, number],
   k: 0 | 1 | 2,
@@ -668,15 +731,49 @@ function MeshingEditor({
         <label className="cad-mesh-label" htmlFor="mesh-n">
           Elements on this line
         </label>
-        <input
-          id="mesh-n"
-          type="number"
-          className="cad-bc-value cad-mesh-int"
-          min={1}
-          step={1}
-          value={elements}
-          onChange={(e) => setElements(parseInt(e.target.value, 10))}
-        />
+        <span className="cad-bc-value-wrap">
+          <input
+            id="mesh-n"
+            type="number"
+            className="cad-bc-value cad-mesh-int"
+            min={1}
+            step={1}
+            value={elements}
+            onChange={(e) => setElements(parseInt(e.target.value, 10))}
+            onKeyDown={(e) => {
+              if (e.key === "ArrowUp") {
+                e.preventDefault();
+                setElements(elements + 1);
+              } else if (e.key === "ArrowDown") {
+                e.preventDefault();
+                setElements(elements - 1);
+              }
+            }}
+          />
+          <span className="cad-mesh-spin">
+            <button
+              type="button"
+              className="cad-mesh-spin-btn"
+              onClick={() => setElements(elements + 1)}
+              tabIndex={-1}
+              title="Add an element"
+              aria-label="Add element"
+            >
+              ▲
+            </button>
+            <button
+              type="button"
+              className="cad-mesh-spin-btn"
+              onClick={() => setElements(elements - 1)}
+              tabIndex={-1}
+              disabled={elements <= 1}
+              title="Remove an element"
+              aria-label="Remove element"
+            >
+              ▼
+            </button>
+          </span>
+        </span>
       </div>
       {elements > 1 && (
         <div className="cad-mesh-checks">
@@ -743,9 +840,12 @@ function BucketEditor({
 }) {
   const setLocal = (idx: 0 | 1 | 2, v: number) => {
     if (!Number.isFinite(v)) return;
-    const next: [number, number, number] = [nodes[0]!, nodes[1]!, nodes[2]!];
-    next[idx] = v;
-    onChange(next);
+    const next = clampNode(nodes, idx, v);
+    if (next !== nodes) onChange(next);
+  };
+  const step = (idx: 0 | 1 | 2, direction: 1 | -1) => {
+    const next = stepNode(nodes, idx, direction);
+    if (next !== nodes) onChange(next);
   };
   return (
     <>
@@ -753,15 +853,47 @@ function BucketEditor({
         <label className="cad-mesh-label">Local coords</label>
         <div className="cad-mesh-etas">
           {([0, 1, 2] as const).map((i) => (
-            <input
-              key={i}
-              type="number"
-              className="cad-bc-value cad-mesh-eta"
-              step="any"
-              value={formatEta(nodes[i]!)}
-              onChange={(e) => setLocal(i, parseFloat(e.target.value))}
-              title={`η_${i + 1} ∈ [-1, +1]`}
-            />
+            <div key={i} className="cad-mesh-eta-wrap">
+              <input
+                type="number"
+                className="cad-bc-value cad-mesh-eta"
+                step="any"
+                value={formatEta(nodes[i]!)}
+                onChange={(e) => setLocal(i, parseFloat(e.target.value))}
+                onKeyDown={(e) => {
+                  if (e.key === "ArrowUp") {
+                    e.preventDefault();
+                    step(i, 1);
+                  } else if (e.key === "ArrowDown") {
+                    e.preventDefault();
+                    step(i, -1);
+                  }
+                }}
+                title={`η_${i + 1} ∈ [-1, +1] · ↑/↓ snap-steps`}
+              />
+              <div className="cad-mesh-spin">
+                <button
+                  type="button"
+                  className="cad-mesh-spin-btn"
+                  onClick={() => step(i, 1)}
+                  tabIndex={-1}
+                  title="Snap to next"
+                  aria-label="Snap to next"
+                >
+                  ▲
+                </button>
+                <button
+                  type="button"
+                  className="cad-mesh-spin-btn"
+                  onClick={() => step(i, -1)}
+                  tabIndex={-1}
+                  title="Snap to previous"
+                  aria-label="Snap to previous"
+                >
+                  ▼
+                </button>
+              </div>
+            </div>
           ))}
         </div>
       </div>
@@ -1055,6 +1187,41 @@ function formatEta(n: number): string {
 
 // ── BC editor ────────────────────────────────────────────────────────────
 
+/**
+ * SI prefixes available on the BC unit selector, ordered DESCENDING so
+ * "up" means a bigger prefix (toward T) and "down" means a smaller one
+ * (toward p). `power` is the exponent of 10.
+ */
+const SI_PREFIXES: readonly { readonly symbol: string; readonly power: number }[] = [
+  { symbol: "T", power: 12 },
+  { symbol: "G", power: 9 },
+  { symbol: "M", power: 6 },
+  { symbol: "k", power: 3 },
+  { symbol: "", power: 0 },
+  { symbol: "m", power: -3 },
+  { symbol: "μ", power: -6 },
+  { symbol: "n", power: -9 },
+  { symbol: "p", power: -12 },
+];
+
+/** Default prefix per BC kind, matching the historical MPa / mm display. */
+function defaultPrefixPower(kind: "traction" | "displacement"): number {
+  return kind === "traction" ? 6 : -3;
+}
+
+/** Base unit per BC kind (the part after the prefix). */
+function baseUnit(kind: "traction" | "displacement"): string {
+  return kind === "traction" ? "Pa" : "m";
+}
+
+/** Format the BC value for display — trim trailing zeros, keep useful precision. */
+function formatBcValue(v: number): string {
+  if (!Number.isFinite(v)) return "0";
+  if (v === 0) return "0";
+  // 6 sig figs, then trim trailing zeros via parseFloat round-trip.
+  return parseFloat(v.toPrecision(6)).toString();
+}
+
 function BcEditor({
   axis,
   bc,
@@ -1068,9 +1235,29 @@ function BcEditor({
   // matching the BEM free-surface convention.
   const kind = bc?.kind ?? "traction";
   const value = bc?.value ?? 0;
-  const unit = kind === "traction" ? "MPa" : "mm";
+  const prefix = bc?.prefix ?? defaultPrefixPower(kind);
+  const prefixIdx = SI_PREFIXES.findIndex((p) => p.power === prefix);
+  const safeIdx = prefixIdx < 0 ? SI_PREFIXES.findIndex((p) => p.power === defaultPrefixPower(kind)) : prefixIdx;
+  const prefixEntry = SI_PREFIXES[safeIdx]!;
   const tractionId = `bc-${axis}-t`;
   const dispId = `bc-${axis}-d`;
+
+  /** Step the prefix by one notch; rescale value so the physical
+   *  magnitude (value · 10^prefix) is unchanged. direction +1 = bigger
+   *  prefix (T-wards), -1 = smaller (p-wards). */
+  const stepPrefix = (direction: 1 | -1) => {
+    const next = direction === 1 ? safeIdx - 1 : safeIdx + 1;
+    if (next < 0 || next >= SI_PREFIXES.length) return;
+    const nextEntry = SI_PREFIXES[next]!;
+    const newValue = value * Math.pow(10, prefix - nextEntry.power);
+    onChange({ kind, value: newValue, prefix: nextEntry.power });
+  };
+
+  const setKind = (newKind: "traction" | "displacement") => {
+    // Reset prefix to that kind's default — different base unit, different
+    // natural prefix.
+    onChange({ kind: newKind, value, prefix: defaultPrefixPower(newKind) });
+  };
 
   return (
     <div className="cad-bc-row">
@@ -1081,7 +1268,7 @@ function BcEditor({
           type="radio"
           name={`bc-${axis}-kind`}
           checked={kind === "traction"}
-          onChange={() => onChange({ kind: "traction", value })}
+          onChange={() => setKind("traction")}
         />
         t
       </label>
@@ -1091,21 +1278,90 @@ function BcEditor({
           type="radio"
           name={`bc-${axis}-kind`}
           checked={kind === "displacement"}
-          onChange={() => onChange({ kind: "displacement", value })}
+          onChange={() => setKind("displacement")}
         />
         d
       </label>
-      <input
-        type="number"
-        className="cad-bc-value"
-        value={value}
-        step="any"
-        onChange={(e) => {
-          const v = parseFloat(e.target.value);
-          if (Number.isFinite(v)) onChange({ kind, value: v });
-        }}
-      />
-      <span className="cad-bc-unit">{unit}</span>
+      <span className="cad-bc-value-wrap">
+        <input
+          type="number"
+          className="cad-bc-value"
+          value={formatBcValue(value)}
+          step="any"
+          onChange={(e) => {
+            const v = parseFloat(e.target.value);
+            if (Number.isFinite(v)) onChange({ kind, value: v, prefix });
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "ArrowUp") {
+              e.preventDefault();
+              onChange({ kind, value: value + 1, prefix });
+            } else if (e.key === "ArrowDown") {
+              e.preventDefault();
+              onChange({ kind, value: value - 1, prefix });
+            }
+          }}
+        />
+        <span className="cad-mesh-spin">
+          <button
+            type="button"
+            className="cad-mesh-spin-btn"
+            onClick={() => onChange({ kind, value: value + 1, prefix })}
+            tabIndex={-1}
+            title="Increment by 1"
+            aria-label="Increment"
+          >
+            ▲
+          </button>
+          <button
+            type="button"
+            className="cad-mesh-spin-btn"
+            onClick={() => onChange({ kind, value: value - 1, prefix })}
+            tabIndex={-1}
+            title="Decrement by 1"
+            aria-label="Decrement"
+          >
+            ▼
+          </button>
+        </span>
+      </span>
+      <span className="cad-bc-unit">
+        {/* Prefix + its own ▲▼ form a single widget so the arrows clearly
+            control the prefix and not the input's value. */}
+        <span className="cad-bc-prefix-control">
+          <span
+            className="cad-bc-prefix"
+            aria-label={`SI prefix ${prefixEntry.symbol || "(none)"}`}
+          >
+            {prefixEntry.symbol || "·"}
+          </span>
+          <span className="cad-mesh-spin">
+            <button
+              type="button"
+              className="cad-mesh-spin-btn"
+              onClick={() => stepPrefix(1)}
+              tabIndex={-1}
+              aria-label="Bigger prefix"
+              title="Bigger prefix (×1000)"
+              disabled={safeIdx === 0}
+            >
+              ▲
+            </button>
+            <button
+              type="button"
+              className="cad-mesh-spin-btn"
+              onClick={() => stepPrefix(-1)}
+              tabIndex={-1}
+              aria-label="Smaller prefix"
+              title="Smaller prefix (÷1000)"
+              disabled={safeIdx === SI_PREFIXES.length - 1}
+            >
+              ▼
+            </button>
+          </span>
+        </span>
+        <span className="cad-bc-base">{baseUnit(kind)}</span>
+      </span>
     </div>
   );
 }

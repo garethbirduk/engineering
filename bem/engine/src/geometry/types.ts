@@ -70,10 +70,24 @@ export interface Domain {
  * For a given direction at a line, you specify EITHER the known displacement
  * OR the known traction (they're duals — one is solved for the other).
  * No assignment in a direction means the BEM default: t = 0 (free surface).
+ *
+ * `value` is in the units displayed to the user (i.e. multiplied by 10^prefix).
+ * `prefix` is the SI exponent of the chosen prefix (M=6, k=3, none=0, m=-3, …).
+ * When prefix is undefined the UI defaults to M for traction and m for
+ * displacement to match the historical hardcoded MPa / mm display.
+ * The physical SI value is `value * 10^prefix`.
  */
 export type DirectionBc =
-  | { readonly kind: "displacement"; readonly value: number }
-  | { readonly kind: "traction"; readonly value: number };
+  | {
+      readonly kind: "displacement";
+      readonly value: number;
+      readonly prefix?: number;
+    }
+  | {
+      readonly kind: "traction";
+      readonly value: number;
+      readonly prefix?: number;
+    };
 
 /**
  * Sparse BC assignment for a single Line. Either or both directions may be
