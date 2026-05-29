@@ -319,8 +319,13 @@ export function CadCanvas() {
     if (model.domains.length === 0) return [];
 
     const ANCHORS = STANDARD_NODES.continuous;
-    const MIN_DIST_TO_BOUNDARY_FRAC = 0.3;
-    const CLUSTER_FRAC = 0.3;
+    // Tolerances expressed as a fraction of the SOURCE element's chord,
+    // not the global average — so a small arc element doesn't get its
+    // candidates rejected by a threshold scaled to the long outer
+    // elements. Offset is 0.5 × chord, so anything below 0.5 here is
+    // guaranteed to pass the candidate's own boundary edge.
+    const MIN_DIST_TO_BOUNDARY_FRAC = 0.4;
+    const CLUSTER_FRAC = 0.2;
 
     // ── 0. Boundary polygons from the geometry (outer + holes). For
     //       arc segments, sample 12 intermediates so chord/arc fit is
@@ -374,20 +379,10 @@ export function CadCanvas() {
     const outerPoly = polysByDomain[0]!;
     const holePolys = polysByDomain.slice(1);
 
-    // Average element chord — sets the tolerance scales.
-    let totalChord = 0;
-    for (const el of meshElements) {
-      totalChord += Math.hypot(
-        el.anchors[2].x - el.anchors[0].x,
-        el.anchors[2].y - el.anchors[0].y,
-      );
-    }
-    const avgChord = totalChord / meshElements.length;
-    const boundaryTol = MIN_DIST_TO_BOUNDARY_FRAC * avgChord;
-    const clusterTol = CLUSTER_FRAC * avgChord;
-
     // ── 1. CREATE candidates from each element's localNodes (all 3).
-    const candidates: Vec2[] = [];
+    //       Carry the SOURCE chord on each candidate so per-element
+    //       tolerances can be applied in the filter passes.
+    const candidates: { p: Vec2; chord: number }[] = [];
     for (const el of meshElements) {
       const a0 = el.anchors[0];
       const a1 = el.anchors[1];
@@ -405,51 +400,62 @@ export function CadCanvas() {
         const tl = Math.hypot(tx, ty) || 1;
         const nx = ty / tl;
         const ny = -tx / tl;
-        candidates.push({ x: px - nx * offset, y: py - ny * offset });
+        candidates.push({
+          p: { x: px - nx * offset, y: py - ny * offset },
+          chord,
+        });
       }
     }
 
     // ── 2. BOUNDARY FILTER — inside outer, outside all holes, and not
-    //       too close to any polygon edge.
-    const boundaryTol2 = boundaryTol * boundaryTol;
-    const insideKept: Vec2[] = [];
-    for (const p of candidates) {
-      if (!pointInPolygon(p, outerPoly.points)) continue;
+    //       too close to any polygon edge. Threshold is per-candidate
+    //       (scales with source element chord).
+    const insideKept: { p: Vec2; chord: number }[] = [];
+    for (const c of candidates) {
+      if (!pointInPolygon(c.p, outerPoly.points)) continue;
       let inHole = false;
       for (const h of holePolys) {
-        if (pointInPolygon(p, h.points)) {
+        if (pointInPolygon(c.p, h.points)) {
           inHole = true;
           break;
         }
       }
       if (inHole) continue;
-      // Too close to any polygon edge?
+      const boundaryTol = MIN_DIST_TO_BOUNDARY_FRAC * c.chord;
+      const boundaryTol2 = boundaryTol * boundaryTol;
       let tooClose = false;
       for (const poly of polysByDomain) {
-        if (minSqDistToPolygonEdges(p, poly.points) < boundaryTol2) {
+        if (minSqDistToPolygonEdges(c.p, poly.points) < boundaryTol2) {
           tooClose = true;
           break;
         }
       }
       if (tooClose) continue;
-      insideKept.push(p);
+      insideKept.push(c);
     }
 
-    // ── 3. CLUSTER MERGE — greedy: first encountered wins, drop
-    //       subsequent candidates within tolerance.
-    const clusterTol2 = clusterTol * clusterTol;
+    // ── 3. CLUSTER MERGE — greedy: first encountered wins. Tolerance
+    //       uses the SMALLER of the two candidates' chords so a small
+    //       arc node doesn't get swallowed by a long-chord straight
+    //       node's tolerance.
     const final: Vec2[] = [];
-    for (const p of insideKept) {
+    const finalChords: number[] = [];
+    for (const c of insideKept) {
       let dup = false;
-      for (const q of final) {
-        const dx = p.x - q.x;
-        const dy = p.y - q.y;
-        if (dx * dx + dy * dy < clusterTol2) {
+      for (let i = 0; i < final.length; i++) {
+        const q = final[i]!;
+        const dx = c.p.x - q.x;
+        const dy = c.p.y - q.y;
+        const tol = CLUSTER_FRAC * Math.min(c.chord, finalChords[i]!);
+        if (dx * dx + dy * dy < tol * tol) {
           dup = true;
           break;
         }
       }
-      if (!dup) final.push(p);
+      if (!dup) {
+        final.push(c.p);
+        finalChords.push(c.chord);
+      }
     }
     return final;
   }, [
