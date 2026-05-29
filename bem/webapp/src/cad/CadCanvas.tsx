@@ -31,7 +31,9 @@ import {
   discretiseLines,
   loopOrientation,
   shapeFunctions,
+  shapeFunctionDerivatives,
   solve,
+  STANDARD_NODES,
   type MeshElement,
   type Vec2,
 } from "@bem/engine";
@@ -253,11 +255,53 @@ export function CadCanvas() {
    *  one element AND the solver returned a non-zero motion. */
   const canShowResults = solvedMesh.length > 0 && deformedScale !== null;
 
-  /** Interior post-process nodes — currently a stub (empty array).
-   *  Future: actual node placement strategy lives here. The Internal
-   *  nodes toggle renders these as dots; the future T6 build adds
-   *  mid-edge nodes between them. */
-  const internalNodes: readonly Vec2[] = useMemo(() => [], []);
+  /** Interior post-process nodes — placed perpendicularly inward
+   *  (opposite the boundary outward normal) from each element's
+   *  η = -1 and η = 0 isoparametric anchor positions, at a distance
+   *  of 0.5 × element chord length. We skip η = +1 because in a
+   *  closed boundary loop the next element's η = -1 is at the same
+   *  world position. Deduped by world position to handle corners and
+   *  any other coincidences. These will become triangle corner nodes;
+   *  later we'll add mid-edge nodes between them to build T6. */
+  const internalNodes: readonly Vec2[] = useMemo(() => {
+    if (meshElements.length === 0) return [];
+    const ANCHORS = STANDARD_NODES.continuous;
+    const out: Vec2[] = [];
+    const POS_EPS = 1e-6;
+    const addUnique = (p: Vec2) => {
+      for (const q of out) {
+        const dx = p.x - q.x;
+        const dy = p.y - q.y;
+        if (dx * dx + dy * dy < POS_EPS * POS_EPS) return;
+      }
+      out.push(p);
+    };
+    for (const el of meshElements) {
+      const a0 = el.anchors[0];
+      const a1 = el.anchors[1];
+      const a2 = el.anchors[2];
+      const chord = Math.hypot(a2.x - a0.x, a2.y - a0.y);
+      if (chord === 0) continue;
+      const offset = 0.5 * chord;
+      for (const eta of [-1, 0] as const) {
+        // World position at this η on the element.
+        const Ns = shapeFunctions(eta, ANCHORS);
+        const px = Ns[0] * a0.x + Ns[1] * a1.x + Ns[2] * a2.x;
+        const py = Ns[0] * a0.y + Ns[1] * a1.y + Ns[2] * a2.y;
+        // Tangent dx/dη at this η, via the shape function derivatives.
+        const dN = shapeFunctionDerivatives(eta, ANCHORS);
+        const tx = dN[0] * a0.x + dN[1] * a1.x + dN[2] * a2.x;
+        const ty = dN[0] * a0.y + dN[1] * a1.y + dN[2] * a2.y;
+        const tl = Math.hypot(tx, ty) || 1;
+        // Outward normal = right-of-tangent = (ty, -tx) / |t|.
+        // Inward = the opposite direction.
+        const nx = ty / tl;
+        const ny = -tx / tl;
+        addUnique({ x: px - nx * offset, y: py - ny * offset });
+      }
+    }
+    return out;
+  }, [meshElements]);
   const canShowInternalNodes = model.domains.length > 0;
 
   /**
