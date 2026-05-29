@@ -25,7 +25,14 @@
 import poly2tri from "poly2tri";
 import type { CadModel, Id, Vec2 } from "../geometry/types.js";
 import type { MeshElement } from "../elements/discretise.js";
+import { arcPoint } from "../geometry/arc.js";
 import { loopOrientation } from "../geometry/orientation.js";
+
+/** Intermediate samples per arc segment when discretising arcs into the
+ *  boundary polygon (chord-arc fit). BEM nodes are added as steiners
+ *  on top of this, so this just needs to be dense enough that the
+ *  polygon hugs the curve. */
+const ARC_SUBDIVISIONS = 12;
 
 /** Ring radii (× arc radius) for the concentric steiner rings placed
  *  around each unique arc centre. Captures gradient near features. */
@@ -77,7 +84,16 @@ export function triangulateDomain(
   mesh: readonly MeshElement[],
   opts: TriangulateOptions = {},
 ): PostMesh | null {
-  if (model.domains.length === 0) return null;
+  if (model.domains.length === 0) {
+    // eslint-disable-next-line no-console
+    console.debug("[triangulate] no domains");
+    return null;
+  }
+  if (mesh.length === 0) {
+    // eslint-disable-next-line no-console
+    console.debug("[triangulate] empty BEM mesh");
+    return null;
+  }
 
   // Group BEM elements by their parent line, in element-order. The
   // triangulation boundary polygon walks segments and appends each
@@ -104,7 +120,7 @@ export function triangulateDomain(
     for (const bId of domain.boundaryIds) {
       const b = model.boundaries.find((bb) => bb.id === bId);
       if (!b || b.segments.length === 0) continue;
-      const pts = boundaryPolygonFromMesh(b, elsByLineId);
+      const pts = boundaryPolygonFromGeometry(b, model);
       if (!pts || pts.length < 3) continue;
       const ori = loopOrientation(b.segments, model);
       if (ori === "degenerate") continue;
@@ -117,7 +133,24 @@ export function triangulateDomain(
       break;
     }
   }
-  if (!outer) return null;
+  if (!outer) {
+    // eslint-disable-next-line no-console
+    console.debug(
+      "[triangulate] no CCW outer boundary found across",
+      model.domains.length,
+      "domain(s);",
+      "boundaries scanned:",
+      model.domains
+        .flatMap((d) => d.boundaryIds)
+        .map((id) => {
+          const b = model.boundaries.find((bb) => bb.id === id);
+          return b
+            ? { name: b.name, segs: b.segments.length }
+            : { name: "?", segs: 0 };
+        }),
+    );
+    return null;
+  }
 
   // Build the Steiner grid inside the outer AABB, masked to domain.
   let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
@@ -171,6 +204,27 @@ export function triangulateDomain(
     steiner.push(pt);
   };
 
+  // ── 0. BEM mesh nodes as steiners (unconditionally). poly2tri places
+  // them as triangulation vertices; if they sit on the polygon edge it
+  // implicitly subdivides that edge. This gives us the property that
+  // boundary triangle vertices ARE BEM nodes, without needing to feed
+  // them into the polygon directly (which broke for straight edges due
+  // to collinear-adjacent vertices). Dedup by position to handle the
+  // continuous-scheme shared corner nodes. */
+  {
+    const seenKeys = new Set<string>();
+    for (const el of mesh) {
+      for (const n of el.nodes) {
+        const k = `${Math.round(n.x / 1e-9)}|${Math.round(n.y / 1e-9)}`;
+        if (seenKeys.has(k)) continue;
+        seenKeys.add(k);
+        // Don't apply the proximity filter for BEM nodes — they're load-
+        // bearing for analysis. Just dedup and add.
+        steiner.push({ x: n.x, y: n.y });
+      }
+    }
+  }
+
   // ── 1. Concentric rings around unique arc centres ──
   // Find each line that's an arc, group by arc-centre id, take any
   // line's radius as the representative for that centre.
@@ -209,6 +263,18 @@ export function triangulateDomain(
     }
   }
 
+  // eslint-disable-next-line no-console
+  console.debug(
+    "[triangulate] outer pts:",
+    outer.points.length,
+    "holes:",
+    holes.length,
+    "steiner:",
+    steiner.length,
+    "step:",
+    step.toFixed(4),
+  );
+
   // poly2tri wants outer as a closed polyline of Point objects.
   const ctx = new poly2tri.SweepContext(
     outer.points.map((p) => new poly2tri.Point(p.x, p.y)),
@@ -220,10 +286,14 @@ export function triangulateDomain(
 
   try {
     ctx.triangulate();
-  } catch {
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn("[triangulate] poly2tri threw:", e);
     return null;
   }
   const tris = ctx.getTriangles();
+  // eslint-disable-next-line no-console
+  console.debug("[triangulate] poly2tri produced", tris.length, "triangles");
 
   // Build the post-mesh: dedupe all vertices by position, then add
   // midpoints (also deduped per edge so shared between adjacent
@@ -279,46 +349,35 @@ export function triangulateDomain(
   return { nodes, triangles, vertexCount };
 }
 
-/** Walk a boundary's segments and assemble the polygon as the ordered
- *  sequence of BEM mesh node positions encountered. Adjacent elements
- *  that share a continuous node and consecutive segments meeting at a
- *  corner are deduped so poly2tri doesn't choke on duplicates. */
-function boundaryPolygonFromMesh(
+/** Walk a boundary's segments and assemble the polygon as corner Points
+ *  plus arc-sampled intermediate vertices (no BEM nodes — those are
+ *  added separately as steiner points to avoid the collinear-adjacent
+ *  vertex case poly2tri can't handle on straight edges). */
+function boundaryPolygonFromGeometry(
   b: { segments: readonly { lineId: Id; direction: 1 | -1 }[] },
-  elsByLineId: ReadonlyMap<Id, readonly MeshElement[]>,
+  model: Pick<CadModel, "lines" | "points">,
 ): Vec2[] | null {
+  const linesById = new Map(model.lines.map((l) => [l.id, l]));
+  const pointsById = new Map(model.points.map((p) => [p.id, p]));
   const out: Vec2[] = [];
-  const POS_EPS = 1e-9;
-  const addUnique = (p: Vec2) => {
-    if (out.length > 0) {
-      const last = out[out.length - 1]!;
-      const dx = p.x - last.x;
-      const dy = p.y - last.y;
-      if (dx * dx + dy * dy < POS_EPS * POS_EPS) return;
-    }
-    out.push(p);
-  };
   for (const seg of b.segments) {
-    const els = elsByLineId.get(seg.lineId);
-    if (!els || els.length === 0) return null;
-    const orderedEls = seg.direction === 1 ? els : [...els].reverse();
-    for (const el of orderedEls) {
-      // Traverse the element's 3 nodes in the segment's direction.
-      const ns = seg.direction === 1
-        ? [el.nodes[0], el.nodes[1], el.nodes[2]]
-        : [el.nodes[2], el.nodes[1], el.nodes[0]];
-      for (const n of ns) addUnique({ x: n.x, y: n.y });
+    const line = linesById.get(seg.lineId);
+    if (!line) return null;
+    const startId = seg.direction === 1 ? line.startId : line.endId;
+    const s = pointsById.get(startId);
+    if (!s) return null;
+    out.push({ x: s.x, y: s.y });
+    if (line.arcCentreId !== undefined) {
+      const lineStart = pointsById.get(line.startId);
+      const lineEnd = pointsById.get(line.endId);
+      const centre = pointsById.get(line.arcCentreId);
+      if (!lineStart || !lineEnd || !centre) return null;
+      for (let i = 1; i < ARC_SUBDIVISIONS; i++) {
+        const tSeg = i / ARC_SUBDIVISIONS;
+        const tLine = seg.direction === 1 ? tSeg : 1 - tSeg;
+        out.push(arcPoint(lineStart, lineEnd, centre, tLine));
+      }
     }
-  }
-  // poly2tri wants an OPEN polyline (it closes implicitly by edge from
-  // last → first). For continuous BEM schemes the last node we just
-  // pushed coincides with the first one — pop it.
-  if (out.length >= 2) {
-    const first = out[0]!;
-    const last = out[out.length - 1]!;
-    const dx = first.x - last.x;
-    const dy = first.y - last.y;
-    if (dx * dx + dy * dy < POS_EPS * POS_EPS) out.pop();
   }
   return out;
 }
