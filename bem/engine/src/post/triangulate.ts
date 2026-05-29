@@ -31,6 +31,17 @@ import { loopOrientation } from "../geometry/orientation.js";
  *  constrained-Delaunay polygon. Higher = closer fit to the true arc. */
 const ARC_SUBDIVISIONS = 12;
 
+/** Ring radii (× arc radius) for the concentric steiner rings placed
+ *  around each unique arc centre. Captures gradient near features. */
+const RING_RADII_FACTORS: readonly number[] = [1.2, 1.5];
+
+/** Proximity rejection threshold for candidate steiner points,
+ *  expressed as a fraction of the steiner spacing. Candidates within
+ *  this distance of any boundary sample or already-accepted steiner
+ *  get dropped — keeps the triangulation from getting pathological in
+ *  tight spaces. */
+const PROXIMITY_THRESHOLD_FRAC = 0.5;
+
 export interface T6Triangle {
   /** 6 node indices into the post-mesh nodes array (3 vertex + 3 midpoints). */
   readonly nodes: readonly [number, number, number, number, number, number];
@@ -107,22 +118,77 @@ export function triangulateDomain(
     1e-9,
     opts.spacing ?? diag * (opts.density ?? DEFAULT_DENSITY),
   );
+  const proximity = step * PROXIMITY_THRESHOLD_FRAC;
+  const proximity2 = proximity * proximity;
+
+  // Reusable inside-domain test.
+  const insideDomain = (pt: Vec2): boolean => {
+    if (!pointInPolygon(pt, outer.points)) return false;
+    for (const h of holes) if (pointInPolygon(pt, h.points)) return false;
+    return true;
+  };
+
+  // Collect boundary samples (the polygon points we just built) — used
+  // for the proximity test against candidate steiner points.
+  const boundarySamples: Vec2[] = [
+    ...outer.points,
+    ...holes.flatMap((h) => h.points),
+  ];
+
   const steiner: Vec2[] = [];
+  const tooCloseToAccepted = (p: Vec2): boolean => {
+    for (const b of boundarySamples) {
+      const dx = p.x - b.x;
+      const dy = p.y - b.y;
+      if (dx * dx + dy * dy < proximity2) return true;
+    }
+    for (const s of steiner) {
+      const dx = p.x - s.x;
+      const dy = p.y - s.y;
+      if (dx * dx + dy * dy < proximity2) return true;
+    }
+    return false;
+  };
+  const tryAccept = (pt: Vec2) => {
+    if (!insideDomain(pt)) return;
+    if (tooCloseToAccepted(pt)) return;
+    steiner.push(pt);
+  };
+
+  // ── 1. Concentric rings around unique arc centres ──
+  // Find each line that's an arc, group by arc-centre id, take any
+  // line's radius as the representative for that centre.
+  const arcsByCentre = new Map<Id, { centre: Vec2; radius: number }>();
+  for (const line of model.lines) {
+    if (line.arcCentreId === undefined) continue;
+    if (arcsByCentre.has(line.arcCentreId)) continue;
+    const c = model.points.find((p) => p.id === line.arcCentreId);
+    const s = model.points.find((p) => p.id === line.startId);
+    if (!c || !s) continue;
+    const r = Math.hypot(s.x - c.x, s.y - c.y);
+    if (r > 0)
+      arcsByCentre.set(line.arcCentreId, { centre: { x: c.x, y: c.y }, radius: r });
+  }
+  for (const { centre, radius } of arcsByCentre.values()) {
+    for (const factor of RING_RADII_FACTORS) {
+      const ringR = radius * factor;
+      // Angular density: 1 point per `step` of arc length.
+      const nPoints = Math.max(8, Math.ceil((2 * Math.PI * ringR) / step));
+      for (let i = 0; i < nPoints; i++) {
+        const theta = (2 * Math.PI * i) / nPoints;
+        tryAccept({
+          x: centre.x + ringR * Math.cos(theta),
+          y: centre.y + ringR * Math.sin(theta),
+        });
+      }
+    }
+  }
+
+  // ── 2. Uniform background grid filling the rest ──
   // Offset by half-step so grid doesn't land exactly on boundary chords.
   for (let x = xMin + step * 0.5; x < xMax; x += step) {
     for (let y = yMin + step * 0.5; y < yMax; y += step) {
-      const pt = { x, y };
-      if (!pointInPolygon(pt, outer.points)) continue;
-      // Skip any inside a hole.
-      let inHole = false;
-      for (const h of holes) {
-        if (pointInPolygon(pt, h.points)) {
-          inHole = true;
-          break;
-        }
-      }
-      if (inHole) continue;
-      steiner.push(pt);
+      tryAccept({ x, y });
     }
   }
 
