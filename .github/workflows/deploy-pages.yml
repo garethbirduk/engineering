@@ -1,0 +1,56 @@
+name: Deploy webapp to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "bem/**"
+      - ".github/workflows/deploy-pages.yml"
+  workflow_dispatch:
+
+# Only one Pages deploy at a time; cancel queued runs that get superseded
+# by a newer push but let the in-progress one finish to avoid half-deploys.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bem
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: bem/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test
+      - name: Build webapp
+        run: npm run -w @bem/webapp build
+        env:
+          # Repo is served from https://garethbirduk.github.io/engineering/
+          # so all asset URLs need the /engineering/ prefix baked in.
+          BASE_URL: /engineering/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: bem/webapp/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
