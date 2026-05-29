@@ -9,7 +9,11 @@
 // at every triangulation vertex; derived stress scalars (σvm, σ1, σ2,
 // τmax) — algebra on the Cartesian components, evaluated per vertex.
 
-import { divergingGradientCss, divergingUxColor } from "./colorScale.js";
+import {
+  bandEdgeValues,
+  divergingGradientCss,
+  divergingUxColor,
+} from "./colorScale.js";
 
 export type InteriorField =
   | "ux"
@@ -154,8 +158,9 @@ export function ResultsPanel({
 }
 
 function ScaleLegend({ stats }: { readonly stats: FieldStats }) {
-  const R = stats.range;
-  const stopLabels = [+R, +R / 2, 0, -R / 2, -R].map(fmtSci);
+  // One label per band edge — these are the exact values at which the
+  // canvas colour jumps from one contour to the next.
+  const edges = bandEdgeValues(stats.range);
   return (
     <div className="results-scale">
       <div
@@ -164,9 +169,9 @@ function ScaleLegend({ stats }: { readonly stats: FieldStats }) {
         aria-hidden="true"
       />
       <div className="results-scale-labels">
-        {stopLabels.map((label, i) => (
+        {edges.map((v, i) => (
           <span key={i} className="results-scale-label">
-            {label}
+            {fmtSci(v)}
           </span>
         ))}
       </div>
