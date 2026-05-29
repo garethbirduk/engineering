@@ -24,12 +24,8 @@
 
 import poly2tri from "poly2tri";
 import type { CadModel, Id, Vec2 } from "../geometry/types.js";
-import { arcPoint } from "../geometry/arc.js";
+import type { MeshElement } from "../elements/discretise.js";
 import { loopOrientation } from "../geometry/orientation.js";
-
-/** Intermediate samples per arc segment when discretising arcs into the
- *  constrained-Delaunay polygon. Higher = closer fit to the true arc. */
-const ARC_SUBDIVISIONS = 12;
 
 /** Ring radii (× arc radius) for the concentric steiner rings placed
  *  around each unique arc centre. Captures gradient near features. */
@@ -64,6 +60,10 @@ export interface TriangulateOptions {
   /** Interior sample spacing as a fraction of the AABB diagonal.
    *  Used when `spacing` is not given. */
   readonly density?: number;
+  /** Ring radii (× arc radius) for the concentric steiner rings placed
+   *  around each unique arc centre. Default [1.2, 1.5]. Empty array
+   *  disables ring placement (uniform grid only). */
+  readonly ringFactors?: readonly number[];
 }
 
 const DEFAULT_DENSITY = 1 / 30;
@@ -74,9 +74,25 @@ const DEFAULT_DENSITY = 1 / 30;
  */
 export function triangulateDomain(
   model: CadModel,
+  mesh: readonly MeshElement[],
   opts: TriangulateOptions = {},
 ): PostMesh | null {
   if (model.domains.length === 0) return null;
+
+  // Group BEM elements by their parent line, in element-order. The
+  // triangulation boundary polygon walks segments and appends each
+  // element's 3 nodes — that way every boundary triangle edge IS a
+  // BEM element (or part of one), and boundary triangle vertices
+  // coincide with solved BEM nodes.
+  const elsByLineId = new Map<Id, MeshElement[]>();
+  for (const el of mesh) {
+    const arr = elsByLineId.get(el.lineId);
+    if (arr) arr.push(el);
+    else elsByLineId.set(el.lineId, [el]);
+  }
+  for (const arr of elsByLineId.values()) {
+    arr.sort((a, b) => a.indexInLine - b.indexInLine);
+  }
 
   // Scan domains for the first one with a usable boundary set (CCW outer
   // + optional holes). User models sometimes accumulate empty domains
@@ -88,7 +104,7 @@ export function triangulateDomain(
     for (const bId of domain.boundaryIds) {
       const b = model.boundaries.find((bb) => bb.id === bId);
       if (!b || b.segments.length === 0) continue;
-      const pts = boundaryPolygon(b, model);
+      const pts = boundaryPolygonFromMesh(b, elsByLineId);
       if (!pts || pts.length < 3) continue;
       const ori = loopOrientation(b.segments, model);
       if (ori === "degenerate") continue;
@@ -169,8 +185,9 @@ export function triangulateDomain(
     if (r > 0)
       arcsByCentre.set(line.arcCentreId, { centre: { x: c.x, y: c.y }, radius: r });
   }
+  const ringFactors = opts.ringFactors ?? RING_RADII_FACTORS;
   for (const { centre, radius } of arcsByCentre.values()) {
-    for (const factor of RING_RADII_FACTORS) {
+    for (const factor of ringFactors) {
       const ringR = radius * factor;
       // Angular density: 1 point per `step` of arc length.
       const nPoints = Math.max(8, Math.ceil((2 * Math.PI * ringR) / step));
@@ -262,40 +279,35 @@ export function triangulateDomain(
   return { nodes, triangles, vertexCount };
 }
 
-/** Walk a boundary's segments and return the ordered sequence of points
- *  encountered, in traversal direction. Straight segments contribute
- *  just the start point; arc segments contribute the start + multiple
- *  intermediate samples along the curve, so the polygon hugs the arc
- *  instead of cutting across the chord. */
-function boundaryPolygon(
+/** Walk a boundary's segments and assemble the polygon as the ordered
+ *  sequence of BEM mesh node positions encountered. Adjacent elements
+ *  that share a continuous node and consecutive segments meeting at a
+ *  corner are deduped so poly2tri doesn't choke on duplicates. */
+function boundaryPolygonFromMesh(
   b: { segments: readonly { lineId: Id; direction: 1 | -1 }[] },
-  model: Pick<CadModel, "lines" | "points">,
+  elsByLineId: ReadonlyMap<Id, readonly MeshElement[]>,
 ): Vec2[] | null {
-  const linesById = new Map(model.lines.map((l) => [l.id, l]));
-  const pointsById = new Map(model.points.map((p) => [p.id, p]));
   const out: Vec2[] = [];
+  const POS_EPS = 1e-9;
+  const addUnique = (p: Vec2) => {
+    if (out.length > 0) {
+      const last = out[out.length - 1]!;
+      const dx = p.x - last.x;
+      const dy = p.y - last.y;
+      if (dx * dx + dy * dy < POS_EPS * POS_EPS) return;
+    }
+    out.push(p);
+  };
   for (const seg of b.segments) {
-    const line = linesById.get(seg.lineId);
-    if (!line) return null;
-    const startId = seg.direction === 1 ? line.startId : line.endId;
-    const s = pointsById.get(startId);
-    if (!s) return null;
-    out.push({ x: s.x, y: s.y });
-
-    // For arc segments, add intermediate samples along the curve so the
-    // constrained polygon approximates the arc, not its chord.
-    if (line.arcCentreId !== undefined) {
-      const lineStart = pointsById.get(line.startId);
-      const lineEnd = pointsById.get(line.endId);
-      const centre = pointsById.get(line.arcCentreId);
-      if (!lineStart || !lineEnd || !centre) return null;
-      for (let i = 1; i < ARC_SUBDIVISIONS; i++) {
-        const tSeg = i / ARC_SUBDIVISIONS; // 0 → seg start, 1 → seg end
-        // arcPoint uses line-parametric t (start of line → end of line),
-        // so flip when the segment traverses the line in reverse.
-        const tLine = seg.direction === 1 ? tSeg : 1 - tSeg;
-        out.push(arcPoint(lineStart, lineEnd, centre, tLine));
-      }
+    const els = elsByLineId.get(seg.lineId);
+    if (!els || els.length === 0) return null;
+    const orderedEls = seg.direction === 1 ? els : [...els].slice().reverse();
+    for (const el of orderedEls) {
+      // Traverse the element's 3 nodes in the segment's direction.
+      const ns = seg.direction === 1
+        ? [el.nodes[0], el.nodes[1], el.nodes[2]]
+        : [el.nodes[2], el.nodes[1], el.nodes[0]];
+      for (const n of ns) addUnique({ x: n.x, y: n.y });
     }
   }
   return out;

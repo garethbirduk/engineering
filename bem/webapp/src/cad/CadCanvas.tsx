@@ -443,13 +443,14 @@ export function CadCanvas() {
     return total / meshElements.length;
   }, [meshElements]);
 
-  /** Interior triangulation for post-processing. Steiner spacing tracks
-   *  the boundary element size, so refining the BEM mesh also refines
-   *  the post-mesh. Recomputes on any geometry / meshing change. */
+  /** Interior triangulation for post-processing. Boundary polygon comes
+   *  from BEM mesh nodes (so triangulation boundary edges coincide with
+   *  BEM elements). Steiner spacing tracks the boundary element size. */
   const postMesh = useMemo(() => {
     if (model.domains.length === 0) return null;
     return triangulateDomain(
       model,
+      meshElements,
       avgBoundaryElementSize !== null
         ? { spacing: avgBoundaryElementSize }
         : {},
@@ -459,6 +460,7 @@ export function CadCanvas() {
     model.lines,
     model.boundaries,
     model.domains,
+    meshElements,
     avgBoundaryElementSize,
   ]);
   const canShowContour = postMesh !== null && postMesh.triangles.length > 0;
