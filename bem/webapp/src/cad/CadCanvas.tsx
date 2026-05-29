@@ -304,15 +304,15 @@ export function CadCanvas() {
    *  one element AND the solver returned a non-zero motion. */
   const canShowResults = solvedMesh.length > 0 && deformedScale !== null;
 
-  /** Internal nodes — single ring inward from every element at offset
-   *  0.25 × element chord. Each element contributes 3 nodes (one per
-   *  localNodes η). Dedup only on near-exact coincidence so continuous-
-   *  scheme shared corner nodes collapse to one — no boundary filtering
-   *  yet, so nodes may land outside the domain in tight regions; we'll
-   *  add filtering / further rings back later. */
+  /** Internal nodes — concentric rings inward from every element at
+   *  successive offsets (0.25, 0.5, … × element chord). Each ring uses
+   *  the same localNodes η positions (radially aligned). Dedup only on
+   *  near-exact coincidence — no boundary filtering yet; future rings
+   *  will fill out toward the centre once filtering returns. */
   const internalNodes: readonly Vec2[] = useMemo(() => {
     if (meshElements.length === 0) return [];
     const ANCHORS = STANDARD_NODES.continuous;
+    const RING_OFFSET_FACTORS: readonly number[] = [0.25, 0.5];
     const COINCIDENT_TOL = 1e-6;
     const COINCIDENT_TOL2 = COINCIDENT_TOL * COINCIDENT_TOL;
     const out: Vec2[] = [];
@@ -330,18 +330,20 @@ export function CadCanvas() {
       const a2 = el.anchors[2];
       const chord = Math.hypot(a2.x - a0.x, a2.y - a0.y);
       if (chord === 0) continue;
-      const offset = 0.25 * chord;
-      for (const eta of el.localNodes) {
-        const Ns = shapeFunctions(eta, ANCHORS);
-        const px = Ns[0] * a0.x + Ns[1] * a1.x + Ns[2] * a2.x;
-        const py = Ns[0] * a0.y + Ns[1] * a1.y + Ns[2] * a2.y;
-        const dN = shapeFunctionDerivatives(eta, ANCHORS);
-        const tx = dN[0] * a0.x + dN[1] * a1.x + dN[2] * a2.x;
-        const ty = dN[0] * a0.y + dN[1] * a1.y + dN[2] * a2.y;
-        const tl = Math.hypot(tx, ty) || 1;
-        const nx = ty / tl;
-        const ny = -tx / tl;
-        addUnique({ x: px - nx * offset, y: py - ny * offset });
+      for (const factor of RING_OFFSET_FACTORS) {
+        const offset = factor * chord;
+        for (const eta of el.localNodes) {
+          const Ns = shapeFunctions(eta, ANCHORS);
+          const px = Ns[0] * a0.x + Ns[1] * a1.x + Ns[2] * a2.x;
+          const py = Ns[0] * a0.y + Ns[1] * a1.y + Ns[2] * a2.y;
+          const dN = shapeFunctionDerivatives(eta, ANCHORS);
+          const tx = dN[0] * a0.x + dN[1] * a1.x + dN[2] * a2.x;
+          const ty = dN[0] * a0.y + dN[1] * a1.y + dN[2] * a2.y;
+          const tl = Math.hypot(tx, ty) || 1;
+          const nx = ty / tl;
+          const ny = -tx / tl;
+          addUnique({ x: px - nx * offset, y: py - ny * offset });
+        }
       }
     }
     return out;
