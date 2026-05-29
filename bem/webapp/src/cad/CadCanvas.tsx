@@ -379,26 +379,18 @@ export function CadCanvas() {
     const outerPoly = polysByDomain[0]!;
     const holePolys = polysByDomain.slice(1);
 
-    // ── Ring expansion: each ring grows 1.5× outward from the previous,
-    //    alternating between the element's own η positions (odd rings)
-    //    and the midpoints between them (even rings). Each ring's
-    //    candidates pass through the same boundary + cluster filters
-    //    using per-element tolerances. The loop stops when a ring
-    //    contributes zero new accepted nodes — the "wave" from one
-    //    side has met the wave from the other.
+    // ── Ring expansion: ring k sits at offset 0.25 × 2^(k-1) × chord
+    //    inward from the boundary, doubling each ring (0.25, 0.5, 1.0,
+    //    2.0, 4.0, ...). All rings use the element's own localNodes η
+    //    positions (no staggering — successive rings line up radially).
+    //    Loop stops when a ring contributes zero new accepted nodes:
+    //    waves from opposing boundaries have met.
     const MAX_RINGS = 10;
-    const RING_SPACING_FACTOR = 1.5;
     const final: Vec2[] = [];
     const finalChords: number[] = [];
 
-    /** Midpoints of consecutive entries — for staggered even-ring placement. */
-    const midpointsBetween = (
-      etas: readonly [number, number, number],
-    ): number[] => [(etas[0] + etas[1]) / 2, (etas[1] + etas[2]) / 2];
-
     for (let ring = 1; ring <= MAX_RINGS; ring++) {
-      const offsetFactor =
-        0.5 * Math.pow(RING_SPACING_FACTOR, ring - 1);
+      const offsetFactor = 0.25 * Math.pow(2, ring - 1);
       // Generate ring `ring` candidates.
       const ringCandidates: { p: Vec2; chord: number }[] = [];
       for (const el of meshElements) {
@@ -408,11 +400,7 @@ export function CadCanvas() {
         const chord = Math.hypot(a2.x - a0.x, a2.y - a0.y);
         if (chord === 0) continue;
         const offset = offsetFactor * chord;
-        const etas =
-          ring % 2 === 1
-            ? [el.localNodes[0], el.localNodes[1], el.localNodes[2]]
-            : midpointsBetween(el.localNodes);
-        for (const eta of etas) {
+        for (const eta of el.localNodes) {
           const Ns = shapeFunctions(eta, ANCHORS);
           const px = Ns[0] * a0.x + Ns[1] * a1.x + Ns[2] * a2.x;
           const py = Ns[0] * a0.y + Ns[1] * a1.y + Ns[2] * a2.y;
