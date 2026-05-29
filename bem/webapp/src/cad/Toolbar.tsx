@@ -12,15 +12,12 @@ interface ToolbarProps {
   readonly canShowResults: boolean;
   readonly internalNodesVisible: boolean;
   readonly canShowInternalNodes: boolean;
-  readonly interiorResultsVisible: boolean;
-  readonly canShowInteriorResults: boolean;
   readonly selectionSummary: string;
   readonly onCreateDomain: () => void;
   readonly onDelete: () => void;
   readonly onToggleMesh: () => void;
   readonly onToggleResults: () => void;
   readonly onToggleInternalNodes: () => void;
-  readonly onToggleInteriorResults: () => void;
   readonly onSave: () => void;
   readonly onLoad: () => void;
   readonly onNew: () => void;
@@ -34,15 +31,12 @@ export function Toolbar({
   canShowResults,
   internalNodesVisible,
   canShowInternalNodes,
-  interiorResultsVisible,
-  canShowInteriorResults,
   selectionSummary,
   onCreateDomain,
   onDelete,
   onToggleMesh,
   onToggleResults,
   onToggleInternalNodes,
-  onToggleInteriorResults,
   onSave,
   onLoad,
   onNew,
@@ -112,20 +106,6 @@ export function Toolbar({
         }
       >
         Boundary results
-      </button>
-      <button
-        type="button"
-        className={`cad-tool ${interiorResultsVisible ? "cad-tool--active" : ""}`}
-        onClick={onToggleInteriorResults}
-        aria-pressed={interiorResultsVisible}
-        disabled={!canShowInteriorResults}
-        title={
-          canShowInteriorResults
-            ? "Show / hide interior ux contour (red +ve, blue -ve, green zero)"
-            : "Need a domain + boundary conditions to enable"
-        }
-      >
-        Interior results (ux)
       </button>
       <div className="cad-toolgroup-sep" aria-hidden="true" />
       <div className="cad-toolgroup" aria-label="File">

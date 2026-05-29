@@ -42,6 +42,8 @@ import {
 } from "@bem/engine";
 import { Toolbar } from "./Toolbar.js";
 import { InfoPanel } from "./InfoPanel.js";
+import { ResultsPanel, type FieldStats } from "./ResultsPanel.js";
+import { divergingUxColor } from "./colorScale.js";
 import { gridStepForViewWidth } from "./gridStep.js";
 import { snapWorld } from "./snap.js";
 import { pointMap } from "./operations.js";
@@ -174,27 +176,6 @@ function pointInPolygon(p: Vec2, poly: readonly Vec2[]): boolean {
   return inside;
 }
 
-/** Diverging blue → green → red colour scale, t ∈ [-1, +1].
- *  t = -1 → deep blue, t = 0 → green, t = +1 → red. Clamped. */
-function divergingUxColor(t: number): string {
-  const x = Math.max(-1, Math.min(1, t));
-  // Two-stop blend: blue→green for x∈[-1,0], green→red for x∈[0,1].
-  const BLUE: [number, number, number] = [40, 90, 210];
-  const GREEN: [number, number, number] = [40, 170, 90];
-  const RED: [number, number, number] = [220, 60, 50];
-  const mix = (
-    a: [number, number, number],
-    b: [number, number, number],
-    f: number,
-  ): string => {
-    const r = Math.round(a[0] + (b[0] - a[0]) * f);
-    const g = Math.round(a[1] + (b[1] - a[1]) * f);
-    const bch = Math.round(a[2] + (b[2] - a[2]) * f);
-    return `rgb(${r},${g},${bch})`;
-  };
-  return x < 0 ? mix(BLUE, GREEN, x + 1) : mix(GREEN, RED, x);
-}
-
 /** Squared distance from point `p` to the polyline made of `poly`'s
  *  segments (closed: edge wraps from last → first). */
 function minSqDistToPolygonEdges(p: Vec2, poly: readonly Vec2[]): number {
@@ -228,7 +209,8 @@ export function CadCanvas() {
   const [state, dispatch] = useReducer(canvasReducer, INITIAL_STATE);
   const [cursorWorld, setCursorWorld] = useState<Vec2 | null>(null);
   const [snap, setSnap] = useState<ReturnType<typeof snapWorld> | null>(null);
-  const [rhsWidth, setRhsWidth] = useState(320);
+  const [lhsWidth, setLhsWidth] = useState(320);
+  const [rhsWidth, setRhsWidth] = useState(260);
 
   const {
     model,
@@ -238,7 +220,7 @@ export function CadCanvas() {
     meshVisible,
     resultsVisible,
     internalNodesVisible,
-    interiorResultsVisible,
+    interiorField,
   } = state;
 
   // Reducer is pure but startDragForHit composes selection + dragSession;
@@ -483,19 +465,31 @@ export function CadCanvas() {
     return { points: pts, triangles: tris };
   }, [meshElements, model.points, internalNodes, boundaryPolygons]);
 
-  /** ux at every triangulation vertex. Points whose position matches a
-   *  solved BEM node (within POS_EPS) take that node's ux directly;
-   *  others go through Somigliana via `interiorDisplacement` against the
-   *  solved boundary. Returns null when triangulation or solve missing. */
+  /** Active interior field values at every triangulation vertex.
+   *  BEM-node coincident points use the solved nodal DOF directly; the
+   *  rest go through Somigliana via `interiorDisplacement` against the
+   *  solved boundary. Returns null when no field is selected, no
+   *  triangulation exists, or the solver hasn't produced output. */
   const interiorFieldValues: readonly number[] | null = useMemo(() => {
-    if (!internalTriangles || solvedMesh.length === 0) return null;
+    if (
+      !internalTriangles ||
+      solvedMesh.length === 0 ||
+      interiorField === null
+    ) {
+      return null;
+    }
     const POS_EPS = 1e-6;
-    const bemByKey = new Map<string, number>();
     const ptKey = (x: number, y: number) =>
       `${Math.round(x / POS_EPS)}|${Math.round(y / POS_EPS)}`;
+    const pickNode = (n: { ux: number; uy: number }) =>
+      interiorField === "ux" ? n.ux : n.uy;
+    const pickInterior = (u: Vec2) =>
+      interiorField === "ux" ? u.x : u.y;
+    const bemByKey = new Map<string, number>();
     for (const el of solvedMesh) {
       for (const n of el.nodes) {
-        if (Number.isFinite(n.ux)) bemByKey.set(ptKey(n.x, n.y), n.ux);
+        const v = pickNode(n);
+        if (Number.isFinite(v)) bemByKey.set(ptKey(n.x, n.y), v);
       }
     }
     const out: number[] = new Array(internalTriangles.points.length);
@@ -505,28 +499,36 @@ export function CadCanvas() {
       if (known !== undefined) {
         out[i] = known;
       } else {
-        const u = interiorDisplacement(p, solvedMesh, DEFAULT_MATERIAL);
-        out[i] = u.x;
+        out[i] = pickInterior(
+          interiorDisplacement(p, solvedMesh, DEFAULT_MATERIAL),
+        );
       }
     }
     return out;
-  }, [internalTriangles, solvedMesh]);
+  }, [internalTriangles, solvedMesh, interiorField]);
 
-  /** Symmetric range for the diverging colour scale (max |ux|). Returns
-   *  null when there's nothing to colour. */
-  const interiorFieldRange: number | null = useMemo(() => {
-    if (!interiorFieldValues) return null;
-    let v = 0;
-    for (const x of interiorFieldValues) {
-      if (Number.isFinite(x) && Math.abs(x) > v) v = Math.abs(x);
+  /** Actual min, max + symmetric range (max |v|) of the active field. */
+  const interiorFieldStats: FieldStats | null = useMemo(() => {
+    if (!interiorFieldValues || interiorFieldValues.length === 0) return null;
+    let min = Infinity;
+    let max = -Infinity;
+    for (const v of interiorFieldValues) {
+      if (!Number.isFinite(v)) continue;
+      if (v < min) min = v;
+      if (v > max) max = v;
     }
-    return v > 0 ? v : null;
+    if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
+    const range = Math.max(Math.abs(min), Math.abs(max));
+    if (range === 0) return null;
+    return { min, max, range };
   }, [interiorFieldValues]);
 
+  /** Can the Results panel show anything useful right now? */
   const canShowInteriorResults =
     !!internalTriangles &&
     internalTriangles.triangles.length > 0 &&
-    interiorFieldRange !== null;
+    solvedMesh.length > 0 &&
+    deformedScale !== null;
 
   /**
    * For every (lineId, indexInLine, nodeIdx) triple, is this node's
@@ -1019,16 +1021,38 @@ export function CadCanvas() {
     if (loaded) dispatch({ type: "loadModel", model: loaded });
   }, []);
 
-  const onResizerDown = useCallback(
+  const onLhsResizerDown = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      const startX = e.clientX;
+      const startWidth = lhsWidth;
+      const onMove = (ev: MouseEvent) => {
+        const dx = ev.clientX - startX;
+        // Dragging RIGHT widens the LHS panel (canvas shrinks);
+        // dragging LEFT narrows it. Clamp to [240, 900] px.
+        const next = Math.max(240, Math.min(900, startWidth + dx));
+        setLhsWidth(next);
+      };
+      const onUp = () => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+    },
+    [lhsWidth],
+  );
+
+  const onRhsResizerDown = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault();
       const startX = e.clientX;
       const startWidth = rhsWidth;
       const onMove = (ev: MouseEvent) => {
         const dx = ev.clientX - startX;
-        // Dragging LEFT widens the panel (canvas shrinks); dragging RIGHT
-        // narrows it. Clamp to [280, 900] px.
-        const next = Math.max(280, Math.min(900, startWidth - dx));
+        // Dragging LEFT widens the RHS panel (canvas shrinks);
+        // dragging RIGHT narrows it. Clamp to [220, 700] px.
+        const next = Math.max(220, Math.min(700, startWidth - dx));
         setRhsWidth(next);
       };
       const onUp = () => {
@@ -1166,17 +1190,12 @@ export function CadCanvas() {
         canShowResults={canShowResults}
         internalNodesVisible={internalNodesVisible}
         canShowInternalNodes={canShowInternalNodes}
-        interiorResultsVisible={interiorResultsVisible}
-        canShowInteriorResults={canShowInteriorResults}
         selectionSummary={selectionSummary}
         onCreateDomain={() => dispatch({ type: "createDomainFromSelection" })}
         onDelete={() => dispatch({ type: "deleteSelection" })}
         onToggleMesh={() => dispatch({ type: "toggleMesh" })}
         onToggleResults={() => dispatch({ type: "toggleResults" })}
         onToggleInternalNodes={() => dispatch({ type: "toggleInternalNodes" })}
-        onToggleInteriorResults={() =>
-          dispatch({ type: "toggleInteriorResults" })
-        }
         onSave={handleSave}
         onLoad={handleLoad}
         onNew={handleNew}
@@ -1184,9 +1203,17 @@ export function CadCanvas() {
       <div
         className="cad-main"
         style={{
-          gridTemplateColumns: `minmax(0, 1fr) 6px ${rhsWidth}px`,
+          gridTemplateColumns: `${lhsWidth}px 6px minmax(0, 1fr) 6px ${rhsWidth}px`,
         }}
       >
+        <InfoPanel model={model} selection={selection} onDispatch={dispatch} />
+        <div
+          className="cad-resizer"
+          role="separator"
+          aria-orientation="vertical"
+          onMouseDown={onLhsResizerDown}
+          title="Drag to resize the Inspector panel"
+        />
         <div className="cad-canvas-host">
           <svg
             ref={svgRef}
@@ -1218,11 +1245,11 @@ export function CadCanvas() {
                   Red = max +ve ux, blue = max -ve, green = 0. Gated
                   independently of the wireframe — fills can sit alone
                   or under the wireframe. */}
-              {interiorResultsVisible &&
+              {interiorField !== null &&
                 interiorFieldValues &&
-                interiorFieldRange !== null &&
+                interiorFieldStats !== null &&
                 internalTriangles && (() => {
-                  const range = interiorFieldRange;
+                  const range = interiorFieldStats.range;
                   const N = 4;
                   const polys: React.ReactElement[] = [];
                   // Hairline seal stroke matching fill — kills the
@@ -1982,13 +2009,16 @@ export function CadCanvas() {
           className="cad-resizer"
           role="separator"
           aria-orientation="vertical"
-          onMouseDown={onResizerDown}
-          title="Drag to resize the Inspector panel"
+          onMouseDown={onRhsResizerDown}
+          title="Drag to resize the Results panel"
         />
-        <InfoPanel
-          model={model}
-          selection={selection}
-          onDispatch={dispatch}
+        <ResultsPanel
+          activeField={interiorField}
+          stats={interiorFieldStats}
+          canShowResults={canShowInteriorResults}
+          onSelectField={(field) =>
+            dispatch({ type: "setInteriorField", field })
+          }
         />
       </div>
     </div>

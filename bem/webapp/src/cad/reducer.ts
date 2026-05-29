@@ -85,9 +85,10 @@ export interface CanvasState {
   /** When true, draw the interior post-process nodes (corners of the
    *  future triangulation). Currently shows nothing — placeholder. */
   readonly internalNodesVisible: boolean;
-  /** When true, fill the interior triangulation with a ux contour
-   *  (red = max +ve, blue = max -ve, green = zero). */
-  readonly interiorResultsVisible: boolean;
+  /** Which interior field is contoured on the triangulation, or null
+   *  if no contour is shown. Each entry in the Results panel maps to
+   *  one of these. Add fields here as stresses come online. */
+  readonly interiorField: "ux" | "uy" | null;
 }
 
 /** Geometric parameters needed to interpret a click/double-click. */
@@ -150,7 +151,10 @@ export type CanvasAction =
   | { readonly type: "toggleMesh" }
   | { readonly type: "toggleResults" }
   | { readonly type: "toggleInternalNodes" }
-  | { readonly type: "toggleInteriorResults" };
+  | {
+      readonly type: "setInteriorField";
+      readonly field: "ux" | "uy" | null;
+    };
 
 export const INITIAL_STATE: CanvasState = {
   model: { points: [], lines: [], boundaries: [], domains: [], bcs: [], meshing: [] },
@@ -160,7 +164,7 @@ export const INITIAL_STATE: CanvasState = {
   meshVisible: false,
   resultsVisible: false,
   internalNodesVisible: false,
-  interiorResultsVisible: false,
+  interiorField: null,
 };
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -246,11 +250,8 @@ export function canvasReducer(
     case "toggleInternalNodes":
       return { ...state, internalNodesVisible: !state.internalNodesVisible };
 
-    case "toggleInteriorResults":
-      return {
-        ...state,
-        interiorResultsVisible: !state.interiorResultsVisible,
-      };
+    case "setInteriorField":
+      return { ...state, interiorField: action.field };
 
     case "cancel":
       if (
