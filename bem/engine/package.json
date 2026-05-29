@@ -16,7 +16,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "ml-matrix": "^6.12.0"
+    "ml-matrix": "^6.12.0",
+    "poly2tri": "^1.5.0"
   },
   "devDependencies": {
     "typescript": "^5.6.3",

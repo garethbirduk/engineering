@@ -29,9 +29,12 @@ import {
   arcPoint,
   arcSvgPathD,
   discretiseLines,
+  evaluatePostField,
   loopOrientation,
   shapeFunctions,
+  shapeFunctionsT6,
   solve,
+  triangulateDomain,
   type MeshElement,
   type Vec2,
 } from "@bem/engine";
@@ -145,6 +148,181 @@ function Grid({ view, step }: { view: ViewBox; step: number }) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Post-process render helpers
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Diverging blue → green → red colormap, auto-scaled to ±vMax.
+ *  v = vMax → red; v = -vMax → blue; v = 0 → green. */
+function divergingColor(v: number, vMax: number): string {
+  const t = Math.max(-1, Math.min(1, v / vMax));
+  // Green at zero, red at +1, blue at -1.
+  const green: [number, number, number] = [74, 174, 74];
+  const red: [number, number, number] = [204, 51, 34];
+  const blue: [number, number, number] = [54, 102, 204];
+  const target = t > 0 ? red : blue;
+  const a = Math.abs(t);
+  const r = Math.round(green[0] * (1 - a) + target[0] * a);
+  const g = Math.round(green[1] * (1 - a) + target[1] * a);
+  const b = Math.round(green[2] * (1 - a) + target[2] * a);
+  return `rgb(${r},${g},${b})`;
+}
+
+/** Subdivide one T6 into N×N flat-colour sub-triangles. Returns SVG
+ *  <polygon> elements. Geometry is linear (T6 anchors coplanar); colour
+ *  uses the quadratic T6 interpolation of nodal field values. */
+function renderT6Contour(
+  tri: { readonly nodes: readonly [number, number, number, number, number, number] },
+  postNodes: readonly Vec2[],
+  postU: readonly Vec2[],
+  vMax: number,
+  triIdx: number,
+): React.ReactElement[] {
+  const N = 4; // 16 sub-triangles per T6 — visually smooth enough.
+  const v1 = postNodes[tri.nodes[0]]!;
+  const v2 = postNodes[tri.nodes[1]]!;
+  const v3 = postNodes[tri.nodes[2]]!;
+  const u: readonly [number, number, number, number, number, number] = [
+    postU[tri.nodes[0]]!.x,
+    postU[tri.nodes[1]]!.x,
+    postU[tri.nodes[2]]!.x,
+    postU[tri.nodes[3]]!.x,
+    postU[tri.nodes[4]]!.x,
+    postU[tri.nodes[5]]!.x,
+  ];
+
+  // Sub-vertex at barycentric (i/N, j/N, (N-i-j)/N) — position is linear,
+  // field is quadratic via T6 shape functions.
+  const pos = (i: number, j: number): Vec2 => {
+    const L1 = i / N;
+    const L2 = j / N;
+    const L3 = 1 - L1 - L2;
+    return {
+      x: L1 * v1.x + L2 * v2.x + L3 * v3.x,
+      y: L1 * v1.y + L2 * v2.y + L3 * v3.y,
+    };
+  };
+  const field = (i: number, j: number): number => {
+    const L1 = i / N;
+    const L2 = j / N;
+    const L3 = 1 - L1 - L2;
+    const Ns = shapeFunctionsT6(L1, L2, L3);
+    return (
+      u[0] * Ns[0] + u[1] * Ns[1] + u[2] * Ns[2] +
+      u[3] * Ns[3] + u[4] * Ns[4] + u[5] * Ns[5]
+    );
+  };
+
+  const out: React.ReactElement[] = [];
+  let subIdx = 0;
+  for (let i = 0; i < N; i++) {
+    for (let j = 0; j < N - i; j++) {
+      // "Up" sub-triangle: (i,j), (i+1,j), (i,j+1)
+      const a = pos(i, j);
+      const b = pos(i + 1, j);
+      const c = pos(i, j + 1);
+      const avgU = (field(i, j) + field(i + 1, j) + field(i, j + 1)) / 3;
+      out.push(
+        <polygon
+          key={`c${triIdx}-${subIdx++}`}
+          points={`${a.x},${a.y} ${b.x},${b.y} ${c.x},${c.y}`}
+          fill={divergingColor(avgU, vMax)}
+          stroke="none"
+        />,
+      );
+      // "Down" sub-triangle: (i+1,j), (i+1,j+1), (i,j+1) if it fits.
+      if (i + j + 1 < N) {
+        const d = pos(i + 1, j);
+        const e = pos(i + 1, j + 1);
+        const f = pos(i, j + 1);
+        const avgU2 =
+          (field(i + 1, j) + field(i + 1, j + 1) + field(i, j + 1)) / 3;
+        out.push(
+          <polygon
+            key={`c${triIdx}-${subIdx++}`}
+            points={`${d.x},${d.y} ${e.x},${e.y} ${f.x},${f.y}`}
+            fill={divergingColor(avgU2, vMax)}
+            stroke="none"
+          />,
+        );
+      }
+    }
+  }
+  return out;
+}
+
+/** Wireframe of the T6 post-mesh: edges + vertex dots + midpoint dots. */
+function renderPostMeshWireframe(
+  postMesh: {
+    readonly nodes: readonly Vec2[];
+    readonly triangles: readonly { readonly nodes: readonly [number, number, number, number, number, number] }[];
+    readonly vertexCount: number;
+  },
+  viewW: number,
+): React.ReactElement[] {
+  const out: React.ReactElement[] = [];
+  const stroke = viewW * 0.0012;
+  const vertexR = viewW * 0.004;
+  const midR = viewW * 0.0025;
+  // Dedupe edges per (lo, hi) sorted pair.
+  const drawnEdges = new Set<string>();
+  const drawEdge = (a: number, b: number, key: string) => {
+    const lo = Math.min(a, b);
+    const hi = Math.max(a, b);
+    const k = `${lo}|${hi}`;
+    if (drawnEdges.has(k)) return;
+    drawnEdges.add(k);
+    const pa = postMesh.nodes[a]!;
+    const pb = postMesh.nodes[b]!;
+    out.push(
+      <line
+        key={key}
+        x1={pa.x}
+        y1={pa.y}
+        x2={pb.x}
+        y2={pb.y}
+        stroke="var(--mesh)"
+        strokeWidth={stroke}
+        opacity={0.35}
+      />,
+    );
+  };
+  postMesh.triangles.forEach((t, ti) => {
+    drawEdge(t.nodes[0], t.nodes[1], `e${ti}-01`);
+    drawEdge(t.nodes[1], t.nodes[2], `e${ti}-12`);
+    drawEdge(t.nodes[2], t.nodes[0], `e${ti}-20`);
+  });
+  // Vertex dots (filled).
+  for (let i = 0; i < postMesh.vertexCount; i++) {
+    const p = postMesh.nodes[i]!;
+    out.push(
+      <circle
+        key={`v${i}`}
+        cx={p.x}
+        cy={p.y}
+        r={vertexR}
+        fill="var(--mesh)"
+      />,
+    );
+  }
+  // Mid-edge dots (smaller, hollow).
+  for (let i = postMesh.vertexCount; i < postMesh.nodes.length; i++) {
+    const p = postMesh.nodes[i]!;
+    out.push(
+      <circle
+        key={`m${i}`}
+        cx={p.x}
+        cy={p.y}
+        r={midR}
+        fill="canvas"
+        stroke="var(--mesh)"
+        strokeWidth={stroke}
+      />,
+    );
+  }
+  return out;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // CadCanvas
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -156,7 +334,16 @@ export function CadCanvas() {
   const [snap, setSnap] = useState<ReturnType<typeof snapWorld> | null>(null);
   const [rhsWidth, setRhsWidth] = useState(320);
 
-  const { model, selection, dragSession, newLineDraft, meshVisible, resultsVisible } = state;
+  const {
+    model,
+    selection,
+    dragSession,
+    newLineDraft,
+    meshVisible,
+    resultsVisible,
+    internalMeshVisible,
+    contourVisible,
+  } = state;
 
   // Reducer is pure but startDragForHit composes selection + dragSession;
   // we keep a ref to the latest state for use inside refs/handlers that
@@ -244,6 +431,39 @@ export function CadCanvas() {
   /** The Displacement results toggle is only useful when there's at least
    *  one element AND the solver returned a non-zero motion. */
   const canShowResults = solvedMesh.length > 0 && deformedScale !== null;
+
+  /** Interior triangulation for post-processing. Recomputes on geometry
+   *  change (model.points / model.lines / model.boundaries / model.domains);
+   *  unaffected by BC / meshing edits. */
+  const postMesh = useMemo(() => {
+    if (model.domains.length === 0) return null;
+    return triangulateDomain(model);
+  }, [model.points, model.lines, model.boundaries, model.domains]);
+  const canShowContour = postMesh !== null && postMesh.triangles.length > 0;
+
+  /** Field values at every post-mesh node — Somigliana evaluation against
+   *  the solved boundary. Recomputes when either the triangulation or
+   *  the solved boundary changes. */
+  const postField = useMemo(() => {
+    if (!postMesh || !canShowResults) return null;
+    return evaluatePostField(postMesh, solvedMesh, {
+      E: 200e9,
+      nu: 0.3,
+      planeKind: "stress",
+    });
+  }, [postMesh, solvedMesh, canShowResults]);
+
+  /** Auto-scaled colormap range for u_x (the only field for v1). */
+  const contourRange = useMemo(() => {
+    if (!postField) return null;
+    let vMax = 0;
+    for (const u of postField.u) {
+      const v = Math.abs(u.x);
+      if (Number.isFinite(v) && v > vMax) vMax = v;
+    }
+    if (vMax === 0) return null;
+    return vMax;
+  }, [postField]);
 
   /**
    * For every (lineId, indexInLine, nodeIdx) triple, is this node's
@@ -881,11 +1101,16 @@ export function CadCanvas() {
         meshVisible={meshVisible}
         resultsVisible={resultsVisible}
         canShowResults={canShowResults}
+        internalMeshVisible={internalMeshVisible}
+        contourVisible={contourVisible}
+        canShowContour={canShowContour}
         selectionSummary={selectionSummary}
         onCreateDomain={() => dispatch({ type: "createDomainFromSelection" })}
         onDelete={() => dispatch({ type: "deleteSelection" })}
         onToggleMesh={() => dispatch({ type: "toggleMesh" })}
         onToggleResults={() => dispatch({ type: "toggleResults" })}
+        onToggleInternalMesh={() => dispatch({ type: "toggleInternalMesh" })}
+        onToggleContour={() => dispatch({ type: "toggleContour" })}
         onSave={handleSave}
         onLoad={handleLoad}
         onNew={handleNew}
@@ -916,10 +1141,29 @@ export function CadCanvas() {
                   d={dp.d}
                   fill="var(--boundary)"
                   fillRule={dp.kind === "bounded" ? "evenodd" : "nonzero"}
-                  fillOpacity={0.18}
+                  fillOpacity={contourVisible ? 0 : 0.18}
                   pointerEvents="none"
                 />
               ))}
+
+              {/* Field contour fill — each T6 is subdivided into N×N
+                  flat-colour sub-triangles; sub-vertex world position is
+                  linear (anchors are coplanar), sub-vertex colour comes
+                  from the quadratic T6 interpolation of nodal u values. */}
+              {contourVisible && postMesh && postField && contourRange !== null && (
+                <g pointerEvents="none">
+                  {postMesh.triangles.flatMap((tri, ti) =>
+                    renderT6Contour(tri, postMesh.nodes, postField.u, contourRange, ti),
+                  )}
+                </g>
+              )}
+
+              {/* Internal post-mesh wireframe. */}
+              {internalMeshVisible && postMesh && (
+                <g pointerEvents="none">
+                  {renderPostMeshWireframe(postMesh, view.width)}
+                </g>
+              )}
 
               {/* Lines (straight or arc) + outward-normal ticks. */}
               <g pointerEvents="none">
