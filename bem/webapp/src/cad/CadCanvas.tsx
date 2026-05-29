@@ -147,6 +147,54 @@ function Grid({ view, step }: { view: ViewBox; step: number }) {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
+// Geometry helpers (used by the internal-nodes filter)
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Fast id→Point map used to look up Point positions from line ids. */
+function pointsByIdLookup<T extends { id: string; x: number; y: number }>(
+  pts: readonly T[],
+): ReadonlyMap<string, T> {
+  return new Map(pts.map((p) => [p.id, p]));
+}
+
+/** Standard ray-casting point-in-polygon. */
+function pointInPolygon(p: Vec2, poly: readonly Vec2[]): boolean {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const pi = poly[i]!;
+    const pj = poly[j]!;
+    const intersect =
+      pi.y > p.y !== pj.y > p.y &&
+      p.x < ((pj.x - pi.x) * (p.y - pi.y)) / (pj.y - pi.y) + pi.x;
+    if (intersect) inside = !inside;
+  }
+  return inside;
+}
+
+/** Squared distance from point `p` to the polyline made of `poly`'s
+ *  segments (closed: edge wraps from last → first). */
+function minSqDistToPolygonEdges(p: Vec2, poly: readonly Vec2[]): number {
+  let minSq = Infinity;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[j]!;
+    const b = poly[i]!;
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const lenSq = dx * dx + dy * dy;
+    let t = lenSq === 0 ? 0 : ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+    if (t < 0) t = 0;
+    else if (t > 1) t = 1;
+    const cx = a.x + t * dx;
+    const cy = a.y + t * dy;
+    const ex = p.x - cx;
+    const ey = p.y - cy;
+    const sq = ex * ex + ey * ey;
+    if (sq < minSq) minSq = sq;
+  }
+  return minSq;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
 // CadCanvas
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -255,27 +303,91 @@ export function CadCanvas() {
    *  one element AND the solver returned a non-zero motion. */
   const canShowResults = solvedMesh.length > 0 && deformedScale !== null;
 
-  /** Interior post-process nodes — placed perpendicularly inward
-   *  (opposite the boundary outward normal) from each element's
-   *  η = -1 and η = 0 isoparametric anchor positions, at a distance
-   *  of 0.5 × element chord length. We skip η = +1 because in a
-   *  closed boundary loop the next element's η = -1 is at the same
-   *  world position. Deduped by world position to handle corners and
-   *  any other coincidences. These will become triangle corner nodes;
-   *  later we'll add mid-edge nodes between them to build T6. */
+  /** Interior post-process nodes built in three passes:
+   *  1. CREATE — for each element + each of its 3 localNodes η values,
+   *     place an inward-offset node at 0.5 × element chord from the
+   *     isoparametric position on the element. Dedup on near-coincident
+   *     world positions during creation (handles continuous-scheme
+   *     shared corners).
+   *  2. BOUNDARY FILTER — drop candidates that are outside the domain,
+   *     inside any hole, or within `MIN_DIST_TO_BOUNDARY × chord` of
+   *     any boundary segment.
+   *  3. CLUSTER MERGE — within a larger tolerance, collapse near-
+   *     coincident accepted nodes into one (first-encountered wins). */
   const internalNodes: readonly Vec2[] = useMemo(() => {
     if (meshElements.length === 0) return [];
+    if (model.domains.length === 0) return [];
+
     const ANCHORS = STANDARD_NODES.continuous;
-    const out: Vec2[] = [];
-    const POS_EPS = 1e-6;
-    const addUnique = (p: Vec2) => {
-      for (const q of out) {
-        const dx = p.x - q.x;
-        const dy = p.y - q.y;
-        if (dx * dx + dy * dy < POS_EPS * POS_EPS) return;
+    const MIN_DIST_TO_BOUNDARY_FRAC = 0.3;
+    const CLUSTER_FRAC = 0.3;
+
+    // ── 0. Boundary polygons from the geometry (outer + holes). For
+    //       arc segments, sample 12 intermediates so chord/arc fit is
+    //       reasonable. Used by both the inside-test and the proximity
+    //       test below.
+    const ARC_SAMPLES = 12;
+    const linesById = new Map(model.lines.map((l) => [l.id, l]));
+    const pointsById = pointsByIdLookup(model.points);
+    type Poly = { points: Vec2[]; orientation: "ccw" | "cw" };
+    const polysByDomain: Poly[] = [];
+    domainLoop: for (const domain of model.domains) {
+      const polys: Poly[] = [];
+      for (const bId of domain.boundaryIds) {
+        const b = model.boundaries.find((bb) => bb.id === bId);
+        if (!b || b.segments.length === 0) continue;
+        const pts: Vec2[] = [];
+        for (const seg of b.segments) {
+          const line = linesById.get(seg.lineId);
+          if (!line) continue;
+          const sId = seg.direction === 1 ? line.startId : line.endId;
+          const eId = seg.direction === 1 ? line.endId : line.startId;
+          const s = pointsById.get(sId);
+          const e = pointsById.get(eId);
+          if (!s || !e) continue;
+          pts.push({ x: s.x, y: s.y });
+          if (line.arcCentreId !== undefined) {
+            const lineStart = pointsById.get(line.startId);
+            const lineEnd = pointsById.get(line.endId);
+            const centre = pointsById.get(line.arcCentreId);
+            if (!lineStart || !lineEnd || !centre) continue;
+            for (let i = 1; i < ARC_SAMPLES; i++) {
+              const tSeg = i / ARC_SAMPLES;
+              const tLine = seg.direction === 1 ? tSeg : 1 - tSeg;
+              pts.push(arcPoint(lineStart, lineEnd, centre, tLine));
+            }
+          }
+        }
+        if (pts.length < 3) continue;
+        const ori = loopOrientation(b.segments, model);
+        if (ori === "degenerate") continue;
+        polys.push({ points: pts, orientation: ori });
       }
-      out.push(p);
-    };
+      const outer = polys.find((p) => p.orientation === "ccw");
+      if (outer) {
+        polysByDomain.push(outer);
+        for (const p of polys) if (p !== outer) polysByDomain.push(p);
+        break domainLoop;
+      }
+    }
+    if (polysByDomain.length === 0) return [];
+    const outerPoly = polysByDomain[0]!;
+    const holePolys = polysByDomain.slice(1);
+
+    // Average element chord — sets the tolerance scales.
+    let totalChord = 0;
+    for (const el of meshElements) {
+      totalChord += Math.hypot(
+        el.anchors[2].x - el.anchors[0].x,
+        el.anchors[2].y - el.anchors[0].y,
+      );
+    }
+    const avgChord = totalChord / meshElements.length;
+    const boundaryTol = MIN_DIST_TO_BOUNDARY_FRAC * avgChord;
+    const clusterTol = CLUSTER_FRAC * avgChord;
+
+    // ── 1. CREATE candidates from each element's localNodes (all 3).
+    const candidates: Vec2[] = [];
     for (const el of meshElements) {
       const a0 = el.anchors[0];
       const a1 = el.anchors[1];
@@ -283,25 +395,70 @@ export function CadCanvas() {
       const chord = Math.hypot(a2.x - a0.x, a2.y - a0.y);
       if (chord === 0) continue;
       const offset = 0.5 * chord;
-      for (const eta of [-1, 0] as const) {
-        // World position at this η on the element.
+      for (const eta of el.localNodes) {
         const Ns = shapeFunctions(eta, ANCHORS);
         const px = Ns[0] * a0.x + Ns[1] * a1.x + Ns[2] * a2.x;
         const py = Ns[0] * a0.y + Ns[1] * a1.y + Ns[2] * a2.y;
-        // Tangent dx/dη at this η, via the shape function derivatives.
         const dN = shapeFunctionDerivatives(eta, ANCHORS);
         const tx = dN[0] * a0.x + dN[1] * a1.x + dN[2] * a2.x;
         const ty = dN[0] * a0.y + dN[1] * a1.y + dN[2] * a2.y;
         const tl = Math.hypot(tx, ty) || 1;
-        // Outward normal = right-of-tangent = (ty, -tx) / |t|.
-        // Inward = the opposite direction.
         const nx = ty / tl;
         const ny = -tx / tl;
-        addUnique({ x: px - nx * offset, y: py - ny * offset });
+        candidates.push({ x: px - nx * offset, y: py - ny * offset });
       }
     }
-    return out;
-  }, [meshElements]);
+
+    // ── 2. BOUNDARY FILTER — inside outer, outside all holes, and not
+    //       too close to any polygon edge.
+    const boundaryTol2 = boundaryTol * boundaryTol;
+    const insideKept: Vec2[] = [];
+    for (const p of candidates) {
+      if (!pointInPolygon(p, outerPoly.points)) continue;
+      let inHole = false;
+      for (const h of holePolys) {
+        if (pointInPolygon(p, h.points)) {
+          inHole = true;
+          break;
+        }
+      }
+      if (inHole) continue;
+      // Too close to any polygon edge?
+      let tooClose = false;
+      for (const poly of polysByDomain) {
+        if (minSqDistToPolygonEdges(p, poly.points) < boundaryTol2) {
+          tooClose = true;
+          break;
+        }
+      }
+      if (tooClose) continue;
+      insideKept.push(p);
+    }
+
+    // ── 3. CLUSTER MERGE — greedy: first encountered wins, drop
+    //       subsequent candidates within tolerance.
+    const clusterTol2 = clusterTol * clusterTol;
+    const final: Vec2[] = [];
+    for (const p of insideKept) {
+      let dup = false;
+      for (const q of final) {
+        const dx = p.x - q.x;
+        const dy = p.y - q.y;
+        if (dx * dx + dy * dy < clusterTol2) {
+          dup = true;
+          break;
+        }
+      }
+      if (!dup) final.push(p);
+    }
+    return final;
+  }, [
+    meshElements,
+    model.points,
+    model.lines,
+    model.boundaries,
+    model.domains,
+  ]);
   const canShowInternalNodes = model.domains.length > 0;
 
   /**
