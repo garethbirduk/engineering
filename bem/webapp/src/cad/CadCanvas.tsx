@@ -379,83 +379,102 @@ export function CadCanvas() {
     const outerPoly = polysByDomain[0]!;
     const holePolys = polysByDomain.slice(1);
 
-    // ── 1. CREATE candidates from each element's localNodes (all 3).
-    //       Carry the SOURCE chord on each candidate so per-element
-    //       tolerances can be applied in the filter passes.
-    const candidates: { p: Vec2; chord: number }[] = [];
-    for (const el of meshElements) {
-      const a0 = el.anchors[0];
-      const a1 = el.anchors[1];
-      const a2 = el.anchors[2];
-      const chord = Math.hypot(a2.x - a0.x, a2.y - a0.y);
-      if (chord === 0) continue;
-      const offset = 0.5 * chord;
-      for (const eta of el.localNodes) {
-        const Ns = shapeFunctions(eta, ANCHORS);
-        const px = Ns[0] * a0.x + Ns[1] * a1.x + Ns[2] * a2.x;
-        const py = Ns[0] * a0.y + Ns[1] * a1.y + Ns[2] * a2.y;
-        const dN = shapeFunctionDerivatives(eta, ANCHORS);
-        const tx = dN[0] * a0.x + dN[1] * a1.x + dN[2] * a2.x;
-        const ty = dN[0] * a0.y + dN[1] * a1.y + dN[2] * a2.y;
-        const tl = Math.hypot(tx, ty) || 1;
-        const nx = ty / tl;
-        const ny = -tx / tl;
-        candidates.push({
-          p: { x: px - nx * offset, y: py - ny * offset },
-          chord,
-        });
-      }
-    }
-
-    // ── 2. BOUNDARY FILTER — inside outer, outside all holes, and not
-    //       too close to any polygon edge. Threshold is per-candidate
-    //       (scales with source element chord).
-    const insideKept: { p: Vec2; chord: number }[] = [];
-    for (const c of candidates) {
-      if (!pointInPolygon(c.p, outerPoly.points)) continue;
-      let inHole = false;
-      for (const h of holePolys) {
-        if (pointInPolygon(c.p, h.points)) {
-          inHole = true;
-          break;
-        }
-      }
-      if (inHole) continue;
-      const boundaryTol = MIN_DIST_TO_BOUNDARY_FRAC * c.chord;
-      const boundaryTol2 = boundaryTol * boundaryTol;
-      let tooClose = false;
-      for (const poly of polysByDomain) {
-        if (minSqDistToPolygonEdges(c.p, poly.points) < boundaryTol2) {
-          tooClose = true;
-          break;
-        }
-      }
-      if (tooClose) continue;
-      insideKept.push(c);
-    }
-
-    // ── 3. CLUSTER MERGE — greedy: first encountered wins. Tolerance
-    //       uses the SMALLER of the two candidates' chords so a small
-    //       arc node doesn't get swallowed by a long-chord straight
-    //       node's tolerance.
+    // ── Ring expansion: each ring grows 1.5× outward from the previous,
+    //    alternating between the element's own η positions (odd rings)
+    //    and the midpoints between them (even rings). Each ring's
+    //    candidates pass through the same boundary + cluster filters
+    //    using per-element tolerances. The loop stops when a ring
+    //    contributes zero new accepted nodes — the "wave" from one
+    //    side has met the wave from the other.
+    const MAX_RINGS = 10;
+    const RING_SPACING_FACTOR = 1.5;
     const final: Vec2[] = [];
     const finalChords: number[] = [];
-    for (const c of insideKept) {
-      let dup = false;
-      for (let i = 0; i < final.length; i++) {
-        const q = final[i]!;
-        const dx = c.p.x - q.x;
-        const dy = c.p.y - q.y;
-        const tol = CLUSTER_FRAC * Math.min(c.chord, finalChords[i]!);
-        if (dx * dx + dy * dy < tol * tol) {
-          dup = true;
-          break;
+
+    /** Midpoints of consecutive entries — for staggered even-ring placement. */
+    const midpointsBetween = (
+      etas: readonly [number, number, number],
+    ): number[] => [(etas[0] + etas[1]) / 2, (etas[1] + etas[2]) / 2];
+
+    for (let ring = 1; ring <= MAX_RINGS; ring++) {
+      const offsetFactor =
+        0.5 * Math.pow(RING_SPACING_FACTOR, ring - 1);
+      // Generate ring `ring` candidates.
+      const ringCandidates: { p: Vec2; chord: number }[] = [];
+      for (const el of meshElements) {
+        const a0 = el.anchors[0];
+        const a1 = el.anchors[1];
+        const a2 = el.anchors[2];
+        const chord = Math.hypot(a2.x - a0.x, a2.y - a0.y);
+        if (chord === 0) continue;
+        const offset = offsetFactor * chord;
+        const etas =
+          ring % 2 === 1
+            ? [el.localNodes[0], el.localNodes[1], el.localNodes[2]]
+            : midpointsBetween(el.localNodes);
+        for (const eta of etas) {
+          const Ns = shapeFunctions(eta, ANCHORS);
+          const px = Ns[0] * a0.x + Ns[1] * a1.x + Ns[2] * a2.x;
+          const py = Ns[0] * a0.y + Ns[1] * a1.y + Ns[2] * a2.y;
+          const dN = shapeFunctionDerivatives(eta, ANCHORS);
+          const tx = dN[0] * a0.x + dN[1] * a1.x + dN[2] * a2.x;
+          const ty = dN[0] * a0.y + dN[1] * a1.y + dN[2] * a2.y;
+          const tl = Math.hypot(tx, ty) || 1;
+          const nx = ty / tl;
+          const ny = -tx / tl;
+          ringCandidates.push({
+            p: { x: px - nx * offset, y: py - ny * offset },
+            chord,
+          });
         }
       }
-      if (!dup) {
-        final.push(c.p);
-        finalChords.push(c.chord);
+
+      // Filter: outside domain / in hole / too close to boundary.
+      const insideKept: { p: Vec2; chord: number }[] = [];
+      for (const c of ringCandidates) {
+        if (!pointInPolygon(c.p, outerPoly.points)) continue;
+        let inHole = false;
+        for (const h of holePolys) {
+          if (pointInPolygon(c.p, h.points)) {
+            inHole = true;
+            break;
+          }
+        }
+        if (inHole) continue;
+        const boundaryTol = MIN_DIST_TO_BOUNDARY_FRAC * c.chord;
+        const boundaryTol2 = boundaryTol * boundaryTol;
+        let tooClose = false;
+        for (const poly of polysByDomain) {
+          if (minSqDistToPolygonEdges(c.p, poly.points) < boundaryTol2) {
+            tooClose = true;
+            break;
+          }
+        }
+        if (tooClose) continue;
+        insideKept.push(c);
       }
+
+      // Cluster against ALL previously accepted nodes (across rings).
+      let addedThisRing = 0;
+      for (const c of insideKept) {
+        let dup = false;
+        for (let i = 0; i < final.length; i++) {
+          const q = final[i]!;
+          const dx = c.p.x - q.x;
+          const dy = c.p.y - q.y;
+          const tol = CLUSTER_FRAC * Math.min(c.chord, finalChords[i]!);
+          if (dx * dx + dy * dy < tol * tol) {
+            dup = true;
+            break;
+          }
+        }
+        if (!dup) {
+          final.push(c.p);
+          finalChords.push(c.chord);
+          addedThisRing++;
+        }
+      }
+      if (addedThisRing === 0) break;
     }
     return final;
   }, [
