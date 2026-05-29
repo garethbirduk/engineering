@@ -1,0 +1,202 @@
+{
+  "version": 3,
+  "model": {
+    "points": [
+      {
+        "id": "1f9c5ede-994c-44c1-81bc-6e6e3462d01d",
+        "x": 0,
+        "y": 0
+      },
+      {
+        "id": "734000a1-0b97-4cf1-8e91-30586c37d734",
+        "x": 0,
+        "y": 8
+      },
+      {
+        "id": "75b5fd1d-a7e8-414c-972b-a6da9e438aaf",
+        "x": 8,
+        "y": 8
+      },
+      {
+        "id": "6197676c-9f3f-495d-baa7-1ed07e3d7ee3",
+        "x": 8,
+        "y": 0
+      }
+    ],
+    "lines": [
+      {
+        "id": "8bcdea5f-36ea-4b78-b455-22dddc258abe",
+        "startId": "734000a1-0b97-4cf1-8e91-30586c37d734",
+        "endId": "1f9c5ede-994c-44c1-81bc-6e6e3462d01d"
+      },
+      {
+        "id": "6afc4d42-5e0e-49e0-b8eb-7310d735b05e",
+        "startId": "75b5fd1d-a7e8-414c-972b-a6da9e438aaf",
+        "endId": "734000a1-0b97-4cf1-8e91-30586c37d734"
+      },
+      {
+        "id": "6f931eb2-982b-4ae2-b05d-153f4d65a5bc",
+        "startId": "6197676c-9f3f-495d-baa7-1ed07e3d7ee3",
+        "endId": "75b5fd1d-a7e8-414c-972b-a6da9e438aaf"
+      },
+      {
+        "id": "564b1915-072e-4567-8b84-74586ec0e43b",
+        "startId": "1f9c5ede-994c-44c1-81bc-6e6e3462d01d",
+        "endId": "6197676c-9f3f-495d-baa7-1ed07e3d7ee3"
+      }
+    ],
+    "boundaries": [
+      {
+        "id": "0586e4ea-12c6-474a-a85c-243a1bd1cfe7",
+        "name": "Boundary 1",
+        "segments": []
+      },
+      {
+        "id": "dd863f61-0d41-4bdc-b0fe-f8c0b81eb081",
+        "name": "Boundary 2",
+        "segments": []
+      },
+      {
+        "id": "73649583-abde-4900-90b9-336eb04e6e35",
+        "name": "Boundary 3",
+        "segments": []
+      },
+      {
+        "id": "95073e75-dd09-4450-8dc7-48b902af8b78",
+        "name": "Boundary 4",
+        "segments": []
+      },
+      {
+        "id": "3ba0d058-af75-4dbb-9c04-81f160e07c6b",
+        "name": "Boundary 5",
+        "segments": [
+          {
+            "lineId": "8bcdea5f-36ea-4b78-b455-22dddc258abe",
+            "direction": 1
+          },
+          {
+            "lineId": "564b1915-072e-4567-8b84-74586ec0e43b",
+            "direction": 1
+          },
+          {
+            "lineId": "6f931eb2-982b-4ae2-b05d-153f4d65a5bc",
+            "direction": 1
+          },
+          {
+            "lineId": "6afc4d42-5e0e-49e0-b8eb-7310d735b05e",
+            "direction": 1
+          }
+        ]
+      },
+      {
+        "id": "78896dcf-e527-4751-a90d-0db788d85f67",
+        "name": "Boundary 6",
+        "segments": []
+      }
+    ],
+    "domains": [
+      {
+        "id": "166b108e-9e51-475e-8b26-cb4dcd05e45c",
+        "name": "Domain 1",
+        "boundaryIds": [
+          "0586e4ea-12c6-474a-a85c-243a1bd1cfe7"
+        ]
+      },
+      {
+        "id": "af2aa314-5e5f-4c2d-874a-54e82f11019c",
+        "name": "Domain 2",
+        "boundaryIds": [
+          "dd863f61-0d41-4bdc-b0fe-f8c0b81eb081"
+        ]
+      },
+      {
+        "id": "9bd5a8ab-817d-463d-9c25-ecb3a20a6f1a",
+        "name": "Domain 3",
+        "boundaryIds": [
+          "73649583-abde-4900-90b9-336eb04e6e35",
+          "95073e75-dd09-4450-8dc7-48b902af8b78"
+        ]
+      },
+      {
+        "id": "61d43614-129d-4fef-8c80-44251e49e790",
+        "name": "Domain 4",
+        "boundaryIds": [
+          "3ba0d058-af75-4dbb-9c04-81f160e07c6b",
+          "78896dcf-e527-4751-a90d-0db788d85f67"
+        ]
+      }
+    ],
+    "bcs": [
+      {
+        "lineId": "8bcdea5f-36ea-4b78-b455-22dddc258abe",
+        "x": {
+          "kind": "displacement",
+          "value": 0,
+          "prefix": -3
+        }
+      },
+      {
+        "lineId": "564b1915-072e-4567-8b84-74586ec0e43b",
+        "y": {
+          "kind": "displacement",
+          "value": 0,
+          "prefix": -3
+        }
+      },
+      {
+        "lineId": "6f931eb2-982b-4ae2-b05d-153f4d65a5bc",
+        "x": {
+          "kind": "traction",
+          "value": 100,
+          "prefix": 9
+        }
+      },
+      {
+        "lineId": "6afc4d42-5e0e-49e0-b8eb-7310d735b05e",
+        "y": {
+          "kind": "traction",
+          "value": 100,
+          "prefix": 9
+        }
+      }
+    ],
+    "meshing": [
+      {
+        "lineId": "564b1915-072e-4567-8b84-74586ec0e43b",
+        "elementsPerLine": 6,
+        "localNodes": [
+          -1,
+          0,
+          1
+        ]
+      },
+      {
+        "lineId": "8bcdea5f-36ea-4b78-b455-22dddc258abe",
+        "elementsPerLine": 6,
+        "localNodes": [
+          -1,
+          0,
+          1
+        ]
+      },
+      {
+        "lineId": "6f931eb2-982b-4ae2-b05d-153f4d65a5bc",
+        "elementsPerLine": 6,
+        "localNodes": [
+          -1,
+          0,
+          1
+        ]
+      },
+      {
+        "lineId": "6afc4d42-5e0e-49e0-b8eb-7310d735b05e",
+        "elementsPerLine": 6,
+        "localNodes": [
+          -1,
+          0,
+          1
+        ]
+      }
+    ]
+  }
+}

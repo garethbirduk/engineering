@@ -17,6 +17,7 @@
 // Coordinate model:
 // - World coords with y up. SVG renders inside <g transform="scale(1,-1)">.
 
+import Delaunator from "delaunator";
 import {
   useCallback,
   useEffect,
@@ -346,6 +347,115 @@ export function CadCanvas() {
     return out;
   }, [meshElements]);
   const canShowInternalNodes = model.domains.length > 0;
+
+  /** Domain boundary polygons (outer CCW + holes CW) sampled from the
+   *  geometry — outer + arc-subdivisions per arc segment. Used to
+   *  filter Delaunay triangles by centroid. */
+  const boundaryPolygons = useMemo(() => {
+    if (model.domains.length === 0) return null;
+    const ARC_SAMPLES = 12;
+    const linesById = new Map(model.lines.map((l) => [l.id, l]));
+    const ptsById = pointsByIdLookup(model.points);
+    type Poly = { points: Vec2[]; orientation: "ccw" | "cw" };
+    for (const domain of model.domains) {
+      const polys: Poly[] = [];
+      for (const bId of domain.boundaryIds) {
+        const b = model.boundaries.find((bb) => bb.id === bId);
+        if (!b || b.segments.length === 0) continue;
+        const pts: Vec2[] = [];
+        for (const seg of b.segments) {
+          const line = linesById.get(seg.lineId);
+          if (!line) continue;
+          const sId = seg.direction === 1 ? line.startId : line.endId;
+          const eId = seg.direction === 1 ? line.endId : line.startId;
+          const s = ptsById.get(sId);
+          const e = ptsById.get(eId);
+          if (!s || !e) continue;
+          pts.push({ x: s.x, y: s.y });
+          if (line.arcCentreId !== undefined) {
+            const lineStart = ptsById.get(line.startId);
+            const lineEnd = ptsById.get(line.endId);
+            const centre = ptsById.get(line.arcCentreId);
+            if (!lineStart || !lineEnd || !centre) continue;
+            for (let i = 1; i < ARC_SAMPLES; i++) {
+              const tSeg = i / ARC_SAMPLES;
+              const tLine = seg.direction === 1 ? tSeg : 1 - tSeg;
+              pts.push(arcPoint(lineStart, lineEnd, centre, tLine));
+            }
+          }
+        }
+        if (pts.length < 3) continue;
+        const ori = loopOrientation(b.segments, model);
+        if (ori === "degenerate") continue;
+        polys.push({ points: pts, orientation: ori });
+      }
+      const outer = polys.find((p) => p.orientation === "ccw");
+      if (outer) {
+        return {
+          outer: outer.points,
+          holes: polys.filter((p) => p !== outer).map((p) => p.points),
+        };
+      }
+    }
+    return null;
+  }, [model.points, model.lines, model.boundaries, model.domains]);
+
+  /** Delaunay triangulation of (boundary BEM nodes + corner Points +
+   *  interior nodes), filtered to keep only triangles whose centroid
+   *  lies inside the domain. */
+  const internalTriangles = useMemo(() => {
+    if (!boundaryPolygons) return null;
+    // Collect all point positions, dedup by quantised key.
+    const POS_EPS = 1e-6;
+    const ptKey = (x: number, y: number) =>
+      `${Math.round(x / POS_EPS)}|${Math.round(y / POS_EPS)}`;
+    const indexByKey = new Map<string, number>();
+    const pts: Vec2[] = [];
+    const addPt = (p: Vec2) => {
+      const k = ptKey(p.x, p.y);
+      if (indexByKey.has(k)) return;
+      indexByKey.set(k, pts.length);
+      pts.push(p);
+    };
+    for (const el of meshElements) {
+      for (const n of el.nodes) addPt({ x: n.x, y: n.y });
+    }
+    for (const p of model.points) addPt({ x: p.x, y: p.y });
+    for (const p of internalNodes) addPt(p);
+    if (pts.length < 3) return null;
+
+    // Flatten for delaunator: [x0, y0, x1, y1, …].
+    const flat = new Float64Array(pts.length * 2);
+    for (let i = 0; i < pts.length; i++) {
+      flat[2 * i] = pts[i]!.x;
+      flat[2 * i + 1] = pts[i]!.y;
+    }
+    const d = new Delaunator(flat);
+    const tris: { a: number; b: number; c: number }[] = [];
+    for (let t = 0; t < d.triangles.length; t += 3) {
+      const a = d.triangles[t]!;
+      const b = d.triangles[t + 1]!;
+      const c = d.triangles[t + 2]!;
+      const pa = pts[a]!;
+      const pb = pts[b]!;
+      const pc = pts[c]!;
+      // Centroid-in-polygon: drop if outside outer or in any hole.
+      const cx = (pa.x + pb.x + pc.x) / 3;
+      const cy = (pa.y + pb.y + pc.y) / 3;
+      const centroid = { x: cx, y: cy };
+      if (!pointInPolygon(centroid, boundaryPolygons.outer)) continue;
+      let inHole = false;
+      for (const h of boundaryPolygons.holes) {
+        if (pointInPolygon(centroid, h)) {
+          inHole = true;
+          break;
+        }
+      }
+      if (inHole) continue;
+      tris.push({ a, b, c });
+    }
+    return { points: pts, triangles: tris };
+  }, [meshElements, model.points, internalNodes, boundaryPolygons]);
 
   /**
    * For every (lineId, indexInLine, nodeIdx) triple, is this node's
@@ -1026,11 +1136,49 @@ export function CadCanvas() {
                 />
               ))}
 
-              {/* Internal post-process nodes (triangle corner points).
-                  Empty for now — placeholder until node placement is
-                  reintroduced. Toggle works; rendering is a no-op. */}
+              {/* Internal post-process mesh: triangle wireframe + node
+                  dots. Triangulation is unconstrained Delaunay over
+                  (boundary BEM nodes + corner Points + interior nodes),
+                  with centroid-in-polygon filtering. */}
               {internalNodesVisible && (
                 <g pointerEvents="none">
+                  {internalTriangles && (() => {
+                    // Dedupe edges so each interior edge renders once.
+                    const drawnEdges = new Set<string>();
+                    const edges: React.ReactElement[] = [];
+                    const stroke = view.width * 0.001;
+                    const addEdge = (
+                      a: number,
+                      b: number,
+                      key: string,
+                    ) => {
+                      const lo = Math.min(a, b);
+                      const hi = Math.max(a, b);
+                      const k = `${lo}|${hi}`;
+                      if (drawnEdges.has(k)) return;
+                      drawnEdges.add(k);
+                      const pa = internalTriangles.points[a]!;
+                      const pb = internalTriangles.points[b]!;
+                      edges.push(
+                        <line
+                          key={key}
+                          x1={pa.x}
+                          y1={pa.y}
+                          x2={pb.x}
+                          y2={pb.y}
+                          stroke="var(--mesh)"
+                          strokeWidth={stroke}
+                          opacity={0.35}
+                        />,
+                      );
+                    };
+                    internalTriangles.triangles.forEach((t, i) => {
+                      addEdge(t.a, t.b, `e${i}-ab`);
+                      addEdge(t.b, t.c, `e${i}-bc`);
+                      addEdge(t.c, t.a, `e${i}-ca`);
+                    });
+                    return edges;
+                  })()}
                   {internalNodes.map((p, i) => (
                     <circle
                       key={`in${i}`}
