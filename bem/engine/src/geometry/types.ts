@@ -89,13 +89,39 @@ export interface BcAssignment {
 
 /**
  * Per-line override of the default discretisation (2 elements, η = ±2/3, 0).
- * Both fields are optional; missing fields fall back to the defaults.
+ * All fields are optional; missing fields fall back to the defaults.
  * Sparse: a Line with no entry uses defaults entirely.
+ *
+ * `localNodes` is the "base" distribution used by any element that does
+ * NOT have its own entry in `elementLocalNodes`. With per-element overrides
+ * you can give the first / last / each element its own nodal scheme.
  */
 export interface LineDiscretisation {
   readonly lineId: Id;
   readonly elementsPerLine?: number;
   readonly localNodes?: readonly [number, number, number];
+  /**
+   * Sparse per-element overrides keyed by element index ("0", "1", ...).
+   * Missing key → that element uses `localNodes` (or the global default).
+   * Length-tied to elementsPerLine: entries with index >= elementsPerLine
+   * are ignored at discretise time.
+   */
+  readonly elementLocalNodes?: {
+    readonly [index: string]: readonly [number, number, number];
+  };
+  /**
+   * UI flags tracking which "distinct" checkboxes are on. Independent of
+   * each other — toggling one never deselects another. When undefined,
+   * the UI derives them from the presence of corresponding entries in
+   * `elementLocalNodes` (backward compat with older models).
+   *
+   * The engine itself ignores these flags; only the entries actually
+   * present in `elementLocalNodes` affect discretisation. The UI is
+   * responsible for keeping the two in sync when flags toggle.
+   */
+  readonly distinctFirst?: boolean;
+  readonly distinctLast?: boolean;
+  readonly distinctAll?: boolean;
 }
 
 // ── whole model ──────────────────────────────────────────────────────────

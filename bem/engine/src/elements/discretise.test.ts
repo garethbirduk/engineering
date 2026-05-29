@@ -72,6 +72,30 @@ describe("discretiseLines", () => {
     expect(els[0]!.nodes[2]).toEqual({ x: 1, y: 0 });
   });
 
+  it("per-element override wins over the line-level base", () => {
+    // 3 elements on a unit line. Middle element gets continuous nodes;
+    // first and third use base (default discontinuous).
+    const model = {
+      points: [
+        { id: "p1", x: 0, y: 0 },
+        { id: "p2", x: 3, y: 0 },
+      ],
+      lines: [{ id: "l1", startId: "p1", endId: "p2" }],
+      meshing: [
+        {
+          lineId: "l1",
+          elementsPerLine: 3,
+          elementLocalNodes: { "1": [-1, 0, 1] as const },
+        },
+      ],
+    };
+    const els = discretiseLines(model);
+    expect(els).toHaveLength(3);
+    expect(els[0]!.localNodes).toEqual([-2 / 3, 0, 2 / 3]); // base
+    expect(els[1]!.localNodes).toEqual([-1, 0, 1]);          // override
+    expect(els[2]!.localNodes).toEqual([-2 / 3, 0, 2 / 3]); // base
+  });
+
   it("per-line override in model.meshing wins over global opts", () => {
     const model = {
       points: [

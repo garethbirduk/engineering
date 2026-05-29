@@ -1002,9 +1002,17 @@ function setLineMeshing(
 ): CanvasState {
   if (!state.model.lines.some((l) => l.id === lineId)) return state;
   const others = state.model.meshing.filter((m) => m.lineId !== lineId);
+  const hasPerEl =
+    value?.elementLocalNodes !== undefined &&
+    Object.keys(value.elementLocalNodes).length > 0;
+  const hasFlag =
+    value?.distinctFirst || value?.distinctLast || value?.distinctAll;
   if (
     !value ||
-    (value.elementsPerLine === undefined && value.localNodes === undefined)
+    (value.elementsPerLine === undefined &&
+      value.localNodes === undefined &&
+      !hasPerEl &&
+      !hasFlag)
   ) {
     if (others.length === state.model.meshing.length) return state;
     return {
@@ -1018,6 +1026,10 @@ function setLineMeshing(
       ? { elementsPerLine: value.elementsPerLine }
       : {}),
     ...(value.localNodes !== undefined ? { localNodes: value.localNodes } : {}),
+    ...(hasPerEl ? { elementLocalNodes: value.elementLocalNodes } : {}),
+    ...(value.distinctFirst ? { distinctFirst: true } : {}),
+    ...(value.distinctLast ? { distinctLast: true } : {}),
+    ...(value.distinctAll ? { distinctAll: true } : {}),
   };
   return {
     ...state,

@@ -413,6 +413,9 @@ function dragNode(
 }
 
 
+type Triple = readonly [number, number, number];
+type PerElement = { readonly [index: string]: Triple };
+
 function MeshingEditor({
   meshing,
   onChange,
@@ -421,54 +424,230 @@ function MeshingEditor({
   onChange: (next: Omit<LineDiscretisation, "lineId"> | undefined) => void;
 }) {
   const elements = meshing?.elementsPerLine ?? DEFAULT_ELEMENTS_PER_LINE;
-  const localNodes = meshing?.localNodes ?? DEFAULT_LOCAL_NODES;
+  const baseNodes = meshing?.localNodes ?? DEFAULT_LOCAL_NODES;
+  const perElement: PerElement = meshing?.elementLocalNodes ?? {};
   const isDefault =
     !meshing ||
     (meshing.elementsPerLine === undefined &&
-      meshing.localNodes === undefined);
+      meshing.localNodes === undefined &&
+      (!meshing.elementLocalNodes ||
+        Object.keys(meshing.elementLocalNodes).length === 0) &&
+      !meshing.distinctFirst &&
+      !meshing.distinctLast &&
+      !meshing.distinctAll);
+
+  // Each flag is INDEPENDENT — backed by an explicit boolean on the model.
+  // Backward compat: for older models with NO explicit flags at all, derive
+  // from data presence. Once ANY flag is set explicitly all three become
+  // explicit (undefined treated as false) so toggling one never silently
+  // flips another via data-derivation.
+  const hasExplicitFlags =
+    meshing !== undefined &&
+    (meshing.distinctFirst !== undefined ||
+      meshing.distinctLast !== undefined ||
+      meshing.distinctAll !== undefined);
+  const distinctFirst = hasExplicitFlags
+    ? !!meshing?.distinctFirst
+    : perElement["0"] !== undefined;
+  const distinctLast =
+    elements > 1 &&
+    (hasExplicitFlags
+      ? !!meshing?.distinctLast
+      : perElement[String(elements - 1)] !== undefined);
+  const distinctAll =
+    elements > 1 &&
+    (hasExplicitFlags
+      ? !!meshing?.distinctAll
+      : Array.from({ length: elements }, (_, i) => perElement[String(i)]).every(
+          (v) => v !== undefined,
+        ));
+
+  /** Build the next LineDiscretisation payload, dropping fields that match
+   *  defaults so model.meshing stays sparse. */
+  const writeBack = (
+    nextBase: Triple,
+    nextPerElement: PerElement,
+    nextElements: number,
+    nextFlags: {
+      first?: boolean;
+      last?: boolean;
+      all?: boolean;
+    } = {
+      first: distinctFirst,
+      last: distinctLast,
+      all: distinctAll,
+    },
+  ) => {
+    const useDefaultN = nextElements === DEFAULT_ELEMENTS_PER_LINE;
+    const isDefaultBase =
+      nextBase[0] === DEFAULT_LOCAL_NODES[0] &&
+      nextBase[1] === DEFAULT_LOCAL_NODES[1] &&
+      nextBase[2] === DEFAULT_LOCAL_NODES[2];
+    const hasPerElement = Object.keys(nextPerElement).length > 0;
+    onChange({
+      ...(useDefaultN ? {} : { elementsPerLine: nextElements }),
+      ...(isDefaultBase ? {} : { localNodes: nextBase }),
+      ...(hasPerElement ? { elementLocalNodes: nextPerElement } : {}),
+      ...(nextFlags.first ? { distinctFirst: true } : {}),
+      ...(nextFlags.last ? { distinctLast: true } : {}),
+      ...(nextFlags.all ? { distinctAll: true } : {}),
+    });
+  };
+
+  // Setting the base (used by inline editor when no checkboxes are set, and
+  // by the "middle / all other elements" bucket).
+  const setBaseNodes = (values: Triple) => {
+    writeBack(values, perElement, elements);
+  };
+
+  const setElementNodes = (index: number, values: Triple) => {
+    const next: { [k: string]: Triple } = { ...perElement };
+    next[String(index)] = values;
+    writeBack(baseNodes, next, elements);
+  };
 
   const setElements = (n: number) => {
     if (!Number.isFinite(n) || n < 1) return;
-    const intN = Math.max(1, Math.floor(n));
-    const useDefault = intN === DEFAULT_ELEMENTS_PER_LINE;
-    onChange({
-      ...(useDefault ? {} : { elementsPerLine: intN }),
-      ...(meshing?.localNodes !== undefined
-        ? { localNodes: meshing.localNodes }
-        : {}),
+    const newN = Math.max(1, Math.floor(n));
+    if (newN === elements) return;
+    // Resize per-element overrides. Preserve first (at index 0); preserve
+    // last by moving it from old N-1 to new N-1. If distinctAll was on,
+    // pad new slots with copies of the base so every element still has an
+    // entry.
+    const next: { [k: string]: Triple } = {};
+    if (distinctFirst && perElement["0"]) next["0"] = perElement["0"];
+    if (
+      distinctLast &&
+      elements > 1 &&
+      newN > 1 &&
+      perElement[String(elements - 1)]
+    ) {
+      next[String(newN - 1)] = perElement[String(elements - 1)]!;
+    }
+    if (distinctAll && newN > 1) {
+      for (let i = 0; i < newN; i++) {
+        if (!next[String(i)]) next[String(i)] = baseNodes;
+      }
+    }
+    writeBack(baseNodes, next, newN);
+  };
+
+  const toggleDistinctFirst = () => {
+    const next: { [k: string]: Triple } = { ...perElement };
+    if (distinctFirst) {
+      // OFF → element 0 stops being distinct unless distinctAll is also on
+      // (in which case its entry is still needed to keep distinctAll's
+      // "every element has an entry" invariant).
+      if (!distinctAll) delete next["0"];
+    } else {
+      // ON → ensure element 0 has its own entry, defaulting to base.
+      if (next["0"] === undefined) next["0"] = baseNodes;
+    }
+    writeBack(baseNodes, next, elements, {
+      first: !distinctFirst,
+      last: distinctLast,
+      all: distinctAll,
     });
   };
 
-  // Single helper for any localNodes change (typed input, preset chip,
-  // dragged handle). If the new values match the defaults exactly we drop
-  // the override so the model stays sparse.
-  const setLocalNodes = (values: readonly [number, number, number]) => {
-    const isDefaultLocal =
-      values[0] === DEFAULT_LOCAL_NODES[0] &&
-      values[1] === DEFAULT_LOCAL_NODES[1] &&
-      values[2] === DEFAULT_LOCAL_NODES[2];
-    onChange({
-      ...(meshing?.elementsPerLine !== undefined
-        ? { elementsPerLine: meshing.elementsPerLine }
-        : {}),
-      ...(isDefaultLocal ? {} : { localNodes: values }),
+  const toggleDistinctLast = () => {
+    const next: { [k: string]: Triple } = { ...perElement };
+    const k = String(elements - 1);
+    if (distinctLast) {
+      if (!distinctAll) delete next[k];
+    } else {
+      if (next[k] === undefined) next[k] = baseNodes;
+    }
+    writeBack(baseNodes, next, elements, {
+      first: distinctFirst,
+      last: !distinctLast,
+      all: distinctAll,
     });
   };
 
-  const setPreset = (values: readonly [number, number, number]) => {
-    setLocalNodes(values);
+  const toggleDistinctAll = () => {
+    const next: { [k: string]: Triple } = { ...perElement };
+    if (distinctAll) {
+      // OFF → drop every entry that isn't still needed by distinctFirst or
+      // distinctLast. First / last entries stay if those flags are on, so
+      // turning off distinctAll never silently strips them.
+      const keep0 = distinctFirst;
+      const keepLast = distinctLast && elements > 1;
+      for (const key of Object.keys(next)) {
+        if (keep0 && key === "0") continue;
+        if (keepLast && key === String(elements - 1)) continue;
+        delete next[key];
+      }
+    } else {
+      // ON → ensure every index has an entry. Existing first/last entries
+      // (or any other previous edits) are preserved.
+      for (let i = 0; i < elements; i++) {
+        if (next[String(i)] === undefined) next[String(i)] = baseNodes;
+      }
+    }
+    writeBack(baseNodes, next, elements, {
+      first: distinctFirst,
+      last: distinctLast,
+      all: !distinctAll,
+    });
   };
 
-  const setLocal = (idx: 0 | 1 | 2, v: number) => {
-    if (!Number.isFinite(v)) return;
-    const next: [number, number, number] = [
-      localNodes[0]!,
-      localNodes[1]!,
-      localNodes[2]!,
-    ];
-    next[idx] = v;
-    setLocalNodes(next);
+  // Compute buckets to render. Empty array = single inline editor (the
+  // pre-bucket layout). One or more buckets = stacked ELEMENT sections.
+  type Bucket = {
+    readonly key: string;
+    readonly title: string;
+    readonly nodes: Triple;
+    readonly onChange: (next: Triple) => void;
+    readonly resetWhich?: "first" | "last" | "element";
+    readonly elementIndex?: number;
   };
+  const buckets: Bucket[] = [];
+  if (distinctAll) {
+    for (let i = 0; i < elements; i++) {
+      const nodes = perElement[String(i)] ?? baseNodes;
+      buckets.push({
+        key: `e${i}`,
+        title: `Element ${i + 1}`,
+        nodes,
+        onChange: (next) => setElementNodes(i, next),
+        resetWhich: "element",
+        elementIndex: i,
+      });
+    }
+  } else if (distinctFirst || distinctLast) {
+    if (distinctFirst) {
+      buckets.push({
+        key: "first",
+        title: "First element",
+        nodes: perElement["0"]!,
+        onChange: (next) => setElementNodes(0, next),
+      });
+    }
+    const middleCount =
+      elements - (distinctFirst ? 1 : 0) - (distinctLast ? 1 : 0);
+    if (middleCount > 0) {
+      buckets.push({
+        key: "middle",
+        title:
+          distinctFirst && distinctLast
+            ? middleCount === 1
+              ? "Middle element"
+              : `Middle elements (${middleCount})`
+            : `All other elements (${middleCount})`,
+        nodes: baseNodes,
+        onChange: setBaseNodes,
+      });
+    }
+    if (distinctLast) {
+      buckets.push({
+        key: "last",
+        title: "Last element",
+        nodes: perElement[String(elements - 1)]!,
+        onChange: (next) => setElementNodes(elements - 1, next),
+      });
+    }
+  }
 
   return (
     <div className="cad-bc-section">
@@ -479,7 +658,7 @@ function MeshingEditor({
             type="button"
             className="cad-bc-reset"
             onClick={() => onChange(undefined)}
-            title="Reset to defaults (2 elements, η = ±2/3, 0)"
+            title="Reset to defaults (2 elements, η = ±2/3, 0, no per-element overrides)"
           >
             reset
           </button>
@@ -499,6 +678,77 @@ function MeshingEditor({
           onChange={(e) => setElements(parseInt(e.target.value, 10))}
         />
       </div>
+      {elements > 1 && (
+        <div className="cad-mesh-checks">
+          <label className="cad-mesh-check">
+            <input
+              type="checkbox"
+              checked={distinctFirst}
+              onChange={toggleDistinctFirst}
+            />
+            distinct first
+          </label>
+          <label className="cad-mesh-check">
+            <input
+              type="checkbox"
+              checked={distinctLast}
+              onChange={toggleDistinctLast}
+            />
+            distinct last
+          </label>
+          <label className="cad-mesh-check">
+            <input
+              type="checkbox"
+              checked={distinctAll}
+              onChange={toggleDistinctAll}
+            />
+            distinct all
+          </label>
+        </div>
+      )}
+      {buckets.length === 0 ? (
+        <BucketEditor nodes={baseNodes} onChange={setBaseNodes} />
+      ) : (
+        buckets.map((b) => {
+          const onReset =
+            b.resetWhich === "element" && b.elementIndex !== undefined
+              ? () => {
+                  const next = { ...perElement };
+                  delete next[String(b.elementIndex!)];
+                  writeBack(baseNodes, next, elements);
+                }
+              : undefined;
+          return (
+            <ElementSection
+              key={b.key}
+              title={b.title}
+              {...(onReset ? { onReset } : {})}
+            >
+              <BucketEditor nodes={b.nodes} onChange={b.onChange} />
+            </ElementSection>
+          );
+        })
+      )}
+    </div>
+  );
+}
+
+/** Local-coord inputs + presets + shape function plot for a single bucket. */
+function BucketEditor({
+  nodes,
+  onChange,
+}: {
+  nodes: Triple;
+  onChange: (next: Triple) => void;
+}) {
+  const setLocal = (idx: 0 | 1 | 2, v: number) => {
+    if (!Number.isFinite(v)) return;
+    const next: [number, number, number] = [nodes[0]!, nodes[1]!, nodes[2]!];
+    next[idx] = v;
+    onChange(next);
+  };
+  return (
+    <>
       <div className="cad-mesh-row">
         <label className="cad-mesh-label">Local coords</label>
         <div className="cad-mesh-etas">
@@ -508,7 +758,7 @@ function MeshingEditor({
               type="number"
               className="cad-bc-value cad-mesh-eta"
               step="any"
-              value={formatEta(localNodes[i]!)}
+              value={formatEta(nodes[i]!)}
               onChange={(e) => setLocal(i, parseFloat(e.target.value))}
               title={`η_${i + 1} ∈ [-1, +1]`}
             />
@@ -523,7 +773,7 @@ function MeshingEditor({
               key={p.label}
               type="button"
               className="cad-mesh-preset"
-              onClick={() => setPreset(p.values)}
+              onClick={() => onChange(p.values)}
               title={`Set local coords to ${p.values
                 .map(formatEta)
                 .join(", ")}`}
@@ -533,7 +783,47 @@ function MeshingEditor({
           ))}
         </div>
       </div>
-      <ShapeFunctionPlot nodes={localNodes} onChange={setLocalNodes} />
+      <ShapeFunctionPlot nodes={nodes} onChange={onChange} />
+    </>
+  );
+}
+
+/** Collapsible sub-section labeled ELEMENT, contains a BucketEditor. */
+function ElementSection({
+  title,
+  onReset,
+  children,
+}: {
+  title: string;
+  onReset?: () => void;
+  children: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div className={`cad-element-section ${open ? "is-open" : ""}`}>
+      <div className="cad-element-header">
+        <button
+          type="button"
+          className="cad-element-toggle"
+          onClick={() => setOpen(!open)}
+          aria-expanded={open}
+        >
+          <span className="cad-element-arrow">{open ? "▾" : "▸"}</span>
+          <span className="cad-element-eyebrow">ELEMENT</span>
+          <span className="cad-element-title">{title}</span>
+        </button>
+        {onReset && (
+          <button
+            type="button"
+            className="cad-bc-reset"
+            onClick={onReset}
+            title="Reset this element to the base distribution"
+          >
+            reset
+          </button>
+        )}
+      </div>
+      {open && <div className="cad-element-body">{children}</div>}
     </div>
   );
 }

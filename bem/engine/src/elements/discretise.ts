@@ -84,6 +84,9 @@ export function discretiseLines(
       readonly lineId: string;
       readonly elementsPerLine?: number;
       readonly localNodes?: readonly [number, number, number];
+      readonly elementLocalNodes?: {
+        readonly [index: string]: readonly [number, number, number];
+      };
     }[];
   },
   opts: DiscretiseOptions = {},
@@ -99,9 +102,12 @@ export function discretiseLines(
   for (const line of model.lines) {
     const override = meshingByLineId.get(line.id);
     const n = Math.max(1, Math.floor(override?.elementsPerLine ?? defaultN));
-    const nodes = override?.localNodes ?? defaultNodes;
+    const baseNodes = override?.localNodes ?? defaultNodes;
+    const perElement = override?.elementLocalNodes;
 
     for (let i = 0; i < n; i++) {
+      // Per-element override wins over the line-level base.
+      const nodes = perElement?.[String(i)] ?? baseNodes;
       const tStart = i / n;
       const tEnd = (i + 1) / n;
       const tMid = (tStart + tEnd) / 2;
