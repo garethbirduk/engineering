@@ -17,7 +17,14 @@
 // true arc).
 
 import { arcPoint } from "../geometry/arc.js";
-import type { CadModel, Line, Point, Vec2 } from "../geometry/types.js";
+import type {
+  BcAssignment,
+  CadModel,
+  DirectionBc,
+  Line,
+  Point,
+  Vec2,
+} from "../geometry/types.js";
 import {
   STANDARD_NODES,
   shapeFunctions,
@@ -30,6 +37,70 @@ import {
  */
 const GEOMETRY_ANCHORS: LocalNodes = STANDARD_NODES.continuous;
 
+/**
+ * Per-node DOF state in 2D elasticity. Each node has 4 fields:
+ * 2 displacement components (ux, uy) and 2 traction components (tx, ty).
+ * Pre-solve, exactly one of each axis pair is KNOWN (filled from the BC)
+ * and the other is UNKNOWN (NaN). Post-solve all 4 are populated.
+ *
+ * Default for any unconstrained DOF: traction known = 0 (BEM free surface),
+ * displacement unknown = NaN.
+ */
+export interface MeshNode {
+  readonly x: number;
+  readonly y: number;
+  readonly ux: number;
+  readonly uy: number;
+  readonly tx: number;
+  readonly ty: number;
+}
+
+/** Default SI prefix per BC kind — mirrors the UI default (MPa / mm). */
+function defaultPrefixPower(kind: "traction" | "displacement"): number {
+  return kind === "traction" ? 6 : -3;
+}
+
+/** BC value in SI base units (Pa or m), applying the SI prefix. */
+function siValue(bc: DirectionBc): number {
+  const p = bc.prefix ?? defaultPrefixPower(bc.kind);
+  return bc.value * Math.pow(10, p);
+}
+
+/**
+ * Build a node's DOF tuple from the line's BC entry.
+ * Free surface default (no BC entry, or no entry for that axis):
+ *   tx = ty = 0 (known), ux = uy = NaN (unknown)
+ * Displacement BC on an axis: that axis's u = value (known), t = NaN.
+ * Traction BC on an axis:      that axis's t = value (known), u = NaN.
+ */
+function nodeDofsFromBc(
+  bc: BcAssignment | undefined,
+): { ux: number; uy: number; tx: number; ty: number } {
+  let ux = NaN;
+  let uy = NaN;
+  let tx = 0;
+  let ty = 0;
+  if (bc?.x) {
+    const v = siValue(bc.x);
+    if (bc.x.kind === "displacement") {
+      ux = v;
+      tx = NaN;
+    } else {
+      tx = v;
+    }
+  }
+  if (bc?.y) {
+    const v = siValue(bc.y);
+    if (bc.y.kind === "displacement") {
+      uy = v;
+      ty = NaN;
+    } else {
+      ty = v;
+    }
+  }
+  return { ux, uy, tx, ty };
+}
+
 export interface MeshElement {
   readonly lineId: string;
   /** 0-based index of this element along its parent line. */
@@ -40,8 +111,12 @@ export interface MeshElement {
   /** World positions of the element endpoints (t = tStart, t = tEnd). */
   readonly start: Vec2;
   readonly end: Vec2;
-  /** World positions of the 3 nodes at the local η coords. */
-  readonly nodes: readonly [Vec2, Vec2, Vec2];
+  /**
+   * 3 nodes at the local η coords. Each carries its world position AND
+   * the 4 DOFs (ux, uy, tx, ty) — knowns populated from the line's BC,
+   * unknowns set to NaN. After solve() runs, the unknowns are filled in.
+   */
+  readonly nodes: readonly [MeshNode, MeshNode, MeshNode];
   /** Local η coords (∈ [-1, +1]) of the 3 nodes — same values used to place them. */
   readonly localNodes: readonly [number, number, number];
   /** Parent-line parametric t corresponding to each node. */
@@ -88,6 +163,7 @@ export function discretiseLines(
         readonly [index: string]: readonly [number, number, number];
       };
     }[];
+    bcs?: readonly BcAssignment[];
   },
   opts: DiscretiseOptions = {},
 ): MeshElement[] {
@@ -97,6 +173,9 @@ export function discretiseLines(
   const meshingByLineId = new Map(
     (model.meshing ?? []).map((m) => [m.lineId, m] as const),
   );
+  const bcByLineId = new Map(
+    (model.bcs ?? []).map((b) => [b.lineId, b] as const),
+  );
   const out: MeshElement[] = [];
 
   for (const line of model.lines) {
@@ -104,6 +183,11 @@ export function discretiseLines(
     const n = Math.max(1, Math.floor(override?.elementsPerLine ?? defaultN));
     const baseNodes = override?.localNodes ?? defaultNodes;
     const perElement = override?.elementLocalNodes;
+    // Pre-solve DOF state for every node on this line, derived from the
+    // line-level BC entry. Same fan-out to every element/node along the
+    // line — the BC applies uniformly. The solver later replaces NaN
+    // entries with computed values.
+    const nodeDofs = nodeDofsFromBc(bcByLineId.get(line.id));
 
     for (let i = 0; i < n; i++) {
       // Per-element override wins over the line-level base.
@@ -124,13 +208,15 @@ export function discretiseLines(
 
       // Node positions via shape-function interpolation on the anchors —
       // identical to what the solver will compute at every Gauss point.
-      const nodePts: Vec2[] = [];
+      // Each MeshNode also carries its 4 DOFs (ux, uy, tx, ty) populated
+      // from the line-level BC (unknowns left as NaN for the solver).
+      const nodePts: MeshNode[] = [];
       const nodeTs: number[] = [];
       for (const eta of nodes) {
         const N = shapeFunctions(eta, GEOMETRY_ANCHORS);
         const px = N[0] * anchor0.x + N[1] * anchor1.x + N[2] * anchor2.x;
         const py = N[0] * anchor0.y + N[1] * anchor1.y + N[2] * anchor2.y;
-        nodePts.push({ x: px, y: py });
+        nodePts.push({ x: px, y: py, ...nodeDofs });
         const local = (eta + 1) / 2;
         nodeTs.push(tStart + local * (tEnd - tStart));
       }

@@ -8,6 +8,7 @@
   --bc-anchor: #2a9d8f;
   --bc-traction: #e76f51;
   --mesh: #1e3a8a;
+  --results: #2563eb;
   /* Geometry tint — sits visually "below" the brighter overlays
      (mesh, BCs, domain fill) so the analysis layers stand out. */
   --geom: #8a8a8a;
@@ -174,8 +175,13 @@ body,
   cursor: pointer;
 }
 
-.cad-tool:hover {
+.cad-tool:hover:not(:disabled) {
   background: color-mix(in srgb, currentColor 8%, canvas);
+}
+
+.cad-tool:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .cad-tool--active {
@@ -189,8 +195,22 @@ body,
   border-color: #c44a4a;
 }
 
-.cad-tool--active:hover {
-  filter: brightness(1.05);
+.cad-tool--active:hover:not(:disabled) {
+  /* Inverted hover state for selected buttons — white background with
+     accent-coloured text instead of brightening the blue (which left
+     white text on a white background, i.e. invisible). */
+  background: canvas;
+  color: var(--accent);
+}
+
+.cad-tool--delete.cad-tool--active:hover:not(:disabled) {
+  background: canvas;
+  color: #c44a4a;
+}
+
+.cad-tool--active:hover:not(:disabled) kbd {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
 }
 
 .cad-tool kbd {

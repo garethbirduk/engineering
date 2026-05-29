@@ -30,6 +30,8 @@ import {
   arcSvgPathD,
   discretiseLines,
   loopOrientation,
+  shapeFunctions,
+  solve,
   type MeshElement,
   type Vec2,
 } from "@bem/engine";
@@ -154,7 +156,7 @@ export function CadCanvas() {
   const [snap, setSnap] = useState<ReturnType<typeof snapWorld> | null>(null);
   const [rhsWidth, setRhsWidth] = useState(320);
 
-  const { model, selection, dragSession, newLineDraft, meshVisible } = state;
+  const { model, selection, dragSession, newLineDraft, meshVisible, resultsVisible } = state;
 
   // Reducer is pure but startDragForHit composes selection + dragSession;
   // we keep a ref to the latest state for use inside refs/handlers that
@@ -209,6 +211,39 @@ export function CadCanvas() {
     }
     return m;
   }, [meshElements]);
+
+  // Solve. Memoised — runs synchronously on every model change (cheap in
+  // 2D for the stub). Real BEM kernel drops in behind the same signature.
+  const solvedMesh = useMemo(() => solve(meshElements), [meshElements]);
+
+  /**
+   * Auto-scale factor for the deformed-shape overlay. We multiply each node's
+   * displacement by this factor before drawing so the max |u| visually equals
+   * 20% of the model AABB diagonal. Returns null if the model is too
+   * degenerate / has no displacement to show (no overlay rendered).
+   */
+  const deformedScale = useMemo(() => {
+    if (solvedMesh.length === 0) return null;
+    let xMin = Infinity, xMax = -Infinity, yMin = Infinity, yMax = -Infinity;
+    let maxU = 0;
+    for (const el of solvedMesh) {
+      for (const n of el.nodes) {
+        if (n.x < xMin) xMin = n.x;
+        if (n.x > xMax) xMax = n.x;
+        if (n.y < yMin) yMin = n.y;
+        if (n.y > yMax) yMax = n.y;
+        const u = Math.hypot(n.ux, n.uy);
+        if (Number.isFinite(u) && u > maxU) maxU = u;
+      }
+    }
+    const diag = Math.hypot(xMax - xMin, yMax - yMin);
+    if (!Number.isFinite(diag) || diag === 0 || maxU === 0) return null;
+    return (0.20 * diag) / maxU;
+  }, [solvedMesh]);
+
+  /** The Displacement results toggle is only useful when there's at least
+   *  one element AND the solver returned a non-zero motion. */
+  const canShowResults = solvedMesh.length > 0 && deformedScale !== null;
 
   /**
    * For every (lineId, indexInLine, nodeIdx) triple, is this node's
@@ -822,10 +857,13 @@ export function CadCanvas() {
         canCreateDomain={canCreateDomain}
         canDelete={selection.length > 0}
         meshVisible={meshVisible}
+        resultsVisible={resultsVisible}
+        canShowResults={canShowResults}
         selectionSummary={selectionSummary}
         onCreateDomain={() => dispatch({ type: "createDomainFromSelection" })}
         onDelete={() => dispatch({ type: "deleteSelection" })}
         onToggleMesh={() => dispatch({ type: "toggleMesh" })}
+        onToggleResults={() => dispatch({ type: "toggleResults" })}
         onSave={handleSave}
         onLoad={handleLoad}
         onNew={handleNew}
@@ -1350,6 +1388,89 @@ export function CadCanvas() {
                   return els;
                 })}
               </g>
+
+              {/* Deformed-shape overlay (toggled). For each element, sample
+                  10 points along η ∈ [-1, +1]; at each, the displaced
+                  position is the original geometry point + scale × displacement
+                  interpolated from the 3 nodes via shape functions. The 3
+                  displaced nodes are also drawn as dashed open circles. */}
+              {resultsVisible && deformedScale !== null && (
+                <g pointerEvents="none">
+                  {solvedMesh.flatMap((el) => {
+                    const line = model.lines.find((l) => l.id === el.lineId);
+                    if (!line) return [];
+                    const lineStart = pointsById.get(line.startId);
+                    const lineEnd = pointsById.get(line.endId);
+                    if (!lineStart || !lineEnd) return [];
+                    const centre = line.arcCentreId
+                      ? pointsById.get(line.arcCentreId)
+                      : undefined;
+
+                    const pointAt = (t: number): Vec2 =>
+                      centre
+                        ? arcPoint(lineStart, lineEnd, centre, t)
+                        : {
+                            x: lineStart.x + t * (lineEnd.x - lineStart.x),
+                            y: lineStart.y + t * (lineEnd.y - lineStart.y),
+                          };
+
+                    // Build a polyline along the deformed element.
+                    const N = 10;
+                    const samples: Vec2[] = [];
+                    for (let i = 0; i < N; i++) {
+                      const eta = -1 + (i / (N - 1)) * 2;
+                      const local = (eta + 1) / 2;
+                      const t = el.tStart + local * (el.tEnd - el.tStart);
+                      const orig = pointAt(t);
+                      const Ns = shapeFunctions(eta, el.localNodes);
+                      const ux =
+                        Ns[0] * el.nodes[0].ux +
+                        Ns[1] * el.nodes[1].ux +
+                        Ns[2] * el.nodes[2].ux;
+                      const uy =
+                        Ns[0] * el.nodes[0].uy +
+                        Ns[1] * el.nodes[1].uy +
+                        Ns[2] * el.nodes[2].uy;
+                      samples.push({
+                        x: orig.x + deformedScale * ux,
+                        y: orig.y + deformedScale * uy,
+                      });
+                    }
+                    const railD = samples
+                      .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`)
+                      .join(" ");
+
+                    // Displaced node positions.
+                    const dashedDot = `${meshStroke * 1.5} ${meshStroke * 1.5}`;
+                    const nodeCircles = el.nodes.map((n, i) => (
+                      <circle
+                        key={`dn${i}`}
+                        cx={n.x + deformedScale * n.ux}
+                        cy={n.y + deformedScale * n.uy}
+                        r={meshNodeRadius}
+                        fill="none"
+                        stroke="var(--results)"
+                        strokeWidth={meshStroke}
+                        strokeDasharray={dashedDot}
+                      />
+                    ));
+
+                    return [
+                      <g key={`${el.lineId}-${el.indexInLine}-def`}>
+                        <path
+                          d={railD}
+                          fill="none"
+                          stroke="var(--results)"
+                          strokeWidth={meshStroke}
+                          strokeLinecap="round"
+                          strokeDasharray={`${meshStroke * 3} ${meshStroke * 2}`}
+                        />
+                        {nodeCircles}
+                      </g>,
+                    ];
+                  })}
+                </g>
+              )}
 
               {/* New-line rubber band. */}
               {rubberBand && (

@@ -80,6 +80,8 @@ export interface CanvasState {
   readonly newLineDraft: NewLineDraft | null;
   /** When true, render the derived mesh overlay (elements + nodes). */
   readonly meshVisible: boolean;
+  /** When true, render the dashed deformed-shape overlay from solve(). */
+  readonly resultsVisible: boolean;
 }
 
 /** Geometric parameters needed to interpret a click/double-click. */
@@ -139,7 +141,8 @@ export type CanvasAction =
       readonly additive: boolean;
     }
   | { readonly type: "cancel" }
-  | { readonly type: "toggleMesh" };
+  | { readonly type: "toggleMesh" }
+  | { readonly type: "toggleResults" };
 
 export const INITIAL_STATE: CanvasState = {
   model: { points: [], lines: [], boundaries: [], domains: [], bcs: [], meshing: [] },
@@ -147,6 +150,7 @@ export const INITIAL_STATE: CanvasState = {
   dragSession: null,
   newLineDraft: null,
   meshVisible: false,
+  resultsVisible: false,
 };
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -225,6 +229,9 @@ export function canvasReducer(
 
     case "toggleMesh":
       return { ...state, meshVisible: !state.meshVisible };
+
+    case "toggleResults":
+      return { ...state, resultsVisible: !state.resultsVisible };
 
     case "cancel":
       if (

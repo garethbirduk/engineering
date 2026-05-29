@@ -8,10 +8,13 @@ interface ToolbarProps {
   readonly canCreateDomain: boolean;
   readonly canDelete: boolean;
   readonly meshVisible: boolean;
+  readonly resultsVisible: boolean;
+  readonly canShowResults: boolean;
   readonly selectionSummary: string;
   readonly onCreateDomain: () => void;
   readonly onDelete: () => void;
   readonly onToggleMesh: () => void;
+  readonly onToggleResults: () => void;
   readonly onSave: () => void;
   readonly onLoad: () => void;
   readonly onNew: () => void;
@@ -21,10 +24,13 @@ export function Toolbar({
   canCreateDomain,
   canDelete,
   meshVisible,
+  resultsVisible,
+  canShowResults,
   selectionSummary,
   onCreateDomain,
   onDelete,
   onToggleMesh,
+  onToggleResults,
   onSave,
   onLoad,
   onNew,
@@ -66,6 +72,20 @@ export function Toolbar({
         title="Show / hide the derived mesh (2 quadratic elements per line)"
       >
         Mesh
+      </button>
+      <button
+        type="button"
+        className={`cad-tool ${resultsVisible ? "cad-tool--active" : ""}`}
+        onClick={onToggleResults}
+        aria-pressed={resultsVisible}
+        disabled={!canShowResults}
+        title={
+          canShowResults
+            ? "Show / hide the deformed-shape overlay (computed displacement)"
+            : "Add geometry + boundary conditions to enable"
+        }
+      >
+        Displacement results
       </button>
       <div className="cad-toolgroup-sep" aria-hidden="true" />
       <div className="cad-toolgroup" aria-label="File">

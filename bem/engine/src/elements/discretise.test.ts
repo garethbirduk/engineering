@@ -67,9 +67,9 @@ describe("discretiseLines", () => {
       localNodes: [-1, 0, 1],
     });
     expect(els).toHaveLength(1);
-    expect(els[0]!.nodes[0]).toEqual({ x: 0, y: 0 });
-    expect(els[0]!.nodes[1]).toEqual({ x: 0.5, y: 0 });
-    expect(els[0]!.nodes[2]).toEqual({ x: 1, y: 0 });
+    expect(els[0]!.nodes[0]).toMatchObject({ x: 0, y: 0 });
+    expect(els[0]!.nodes[1]).toMatchObject({ x: 0.5, y: 0 });
+    expect(els[0]!.nodes[2]).toMatchObject({ x: 1, y: 0 });
   });
 
   it("per-element override wins over the line-level base", () => {
@@ -121,8 +121,8 @@ describe("discretiseLines", () => {
     expect(l2Els).toHaveLength(1);
     expect(l2Els[0]!.localNodes).toEqual([-1, 0, 1]);
     // l2's continuous nodes hit the line endpoints (±1 mapped to t=0, t=1).
-    expect(l2Els[0]!.nodes[0]).toEqual({ x: 1, y: 1 });
-    expect(l2Els[0]!.nodes[2]).toEqual({ x: 0, y: 1 });
+    expect(l2Els[0]!.nodes[0]).toMatchObject({ x: 1, y: 1 });
+    expect(l2Els[0]!.nodes[2]).toMatchObject({ x: 0, y: 1 });
   });
 
   it("MeshElement carries nodeTs that match the localNodes", () => {
@@ -176,6 +176,103 @@ describe("discretiseLines", () => {
     // but not identical (this *is* the visible O(h³) approximation error).
     expect(els[0]!.nodes[0]!.x).toBeCloseTo(0.9903, 3);
     expect(els[0]!.nodes[0]!.y).toBeCloseTo(0.1340, 3);
+  });
+
+  it("free surface default: every node has tx=ty=0 (known) and ux=uy=NaN (unknown)", () => {
+    const model = {
+      points: [
+        { id: "p1", x: 0, y: 0 },
+        { id: "p2", x: 1, y: 0 },
+      ],
+      lines: [{ id: "l1", startId: "p1", endId: "p2" }],
+    };
+    const els = discretiseLines(model);
+    for (const el of els) {
+      for (const n of el.nodes) {
+        expect(n.tx).toBe(0);
+        expect(n.ty).toBe(0);
+        expect(Number.isNaN(n.ux)).toBe(true);
+        expect(Number.isNaN(n.uy)).toBe(true);
+      }
+    }
+  });
+
+  it("displacement BC at line level fans out to every node on every element", () => {
+    const model = {
+      points: [
+        { id: "p1", x: 0, y: 0 },
+        { id: "p2", x: 1, y: 0 },
+      ],
+      lines: [{ id: "l1", startId: "p1", endId: "p2" }],
+      bcs: [
+        {
+          lineId: "l1",
+          // ux = 0 m (displacement BC, no prefix → default m for displacement → 0 * 1e-3 = 0 m)
+          x: { kind: "displacement" as const, value: 0 },
+        },
+      ],
+    };
+    const els = discretiseLines(model);
+    for (const el of els) {
+      for (const n of el.nodes) {
+        // x-axis: displacement constrained → ux known, tx unknown
+        expect(n.ux).toBe(0);
+        expect(Number.isNaN(n.tx)).toBe(true);
+        // y-axis: free surface default (no entry for y) → ty=0 known, uy NaN
+        expect(n.ty).toBe(0);
+        expect(Number.isNaN(n.uy)).toBe(true);
+      }
+    }
+  });
+
+  it("traction BC with SI prefix converts to SI base units", () => {
+    const model = {
+      points: [
+        { id: "p1", x: 0, y: 0 },
+        { id: "p2", x: 1, y: 0 },
+      ],
+      lines: [{ id: "l1", startId: "p1", endId: "p2" }],
+      bcs: [
+        {
+          lineId: "l1",
+          // 100 MPa = 100e6 Pa; explicit prefix = 6.
+          x: { kind: "traction" as const, value: 100, prefix: 6 },
+        },
+      ],
+    };
+    const els = discretiseLines(model);
+    for (const el of els) {
+      for (const n of el.nodes) {
+        expect(n.tx).toBe(100e6);
+        expect(Number.isNaN(n.ux)).toBe(true);
+        // y-axis: free surface
+        expect(n.ty).toBe(0);
+        expect(Number.isNaN(n.uy)).toBe(true);
+      }
+    }
+  });
+
+  it("mixed BC: displacement in x, traction in y", () => {
+    const model = {
+      points: [
+        { id: "p1", x: 0, y: 0 },
+        { id: "p2", x: 1, y: 0 },
+      ],
+      lines: [{ id: "l1", startId: "p1", endId: "p2" }],
+      bcs: [
+        {
+          lineId: "l1",
+          x: { kind: "displacement" as const, value: 0 },
+          y: { kind: "traction" as const, value: -50, prefix: 6 },
+        },
+      ],
+    };
+    const els = discretiseLines(model);
+    const n = els[0]!.nodes[0]!;
+    expect(n.ux).toBe(0);
+    expect(Number.isNaN(n.tx)).toBe(true);
+    expect(n.ty).toBe(-50e6);
+    expect(Number.isNaN(n.uy)).toBe(true);
   });
 
   it("arc with continuous nodes: all 3 nodes per element are exactly on the arc", () => {
