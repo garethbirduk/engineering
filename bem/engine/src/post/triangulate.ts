@@ -45,7 +45,13 @@ export interface PostMesh {
 }
 
 export interface TriangulateOptions {
-  /** Interior sample spacing as a fraction of the AABB diagonal. */
+  /** Absolute spacing for the interior steiner grid, in world units.
+   *  Overrides `density` when both supplied. Typically set to the
+   *  average boundary element size so the interior mesh matches the
+   *  boundary discretisation. */
+  readonly spacing?: number;
+  /** Interior sample spacing as a fraction of the AABB diagonal.
+   *  Used when `spacing` is not given. */
   readonly density?: number;
 }
 
@@ -59,7 +65,6 @@ export function triangulateDomain(
   model: CadModel,
   opts: TriangulateOptions = {},
 ): PostMesh | null {
-  const density = opts.density ?? DEFAULT_DENSITY;
   if (model.domains.length === 0) return null;
 
   // Scan domains for the first one with a usable boundary set (CCW outer
@@ -96,7 +101,12 @@ export function triangulateDomain(
     if (p.y > yMax) yMax = p.y;
   }
   const diag = Math.hypot(xMax - xMin, yMax - yMin);
-  const step = Math.max(1e-9, diag * density);
+  // Pick the steiner spacing: explicit `spacing` wins, otherwise
+  // density × diag, otherwise default density.
+  const step = Math.max(
+    1e-9,
+    opts.spacing ?? diag * (opts.density ?? DEFAULT_DENSITY),
+  );
   const steiner: Vec2[] = [];
   // Offset by half-step so grid doesn't land exactly on boundary chords.
   for (let x = xMin + step * 0.5; x < xMax; x += step) {

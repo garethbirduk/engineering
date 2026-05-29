@@ -432,13 +432,35 @@ export function CadCanvas() {
    *  one element AND the solver returned a non-zero motion. */
   const canShowResults = solvedMesh.length > 0 && deformedScale !== null;
 
-  /** Interior triangulation for post-processing. Recomputes on geometry
-   *  change (model.points / model.lines / model.boundaries / model.domains);
-   *  unaffected by BC / meshing edits. */
+  /** Average boundary element chord length — used as the interior
+   *  steiner spacing so the post-mesh density matches the BEM mesh. */
+  const avgBoundaryElementSize = useMemo(() => {
+    if (meshElements.length === 0) return null;
+    let total = 0;
+    for (const el of meshElements) {
+      total += Math.hypot(el.end.x - el.start.x, el.end.y - el.start.y);
+    }
+    return total / meshElements.length;
+  }, [meshElements]);
+
+  /** Interior triangulation for post-processing. Steiner spacing tracks
+   *  the boundary element size, so refining the BEM mesh also refines
+   *  the post-mesh. Recomputes on any geometry / meshing change. */
   const postMesh = useMemo(() => {
     if (model.domains.length === 0) return null;
-    return triangulateDomain(model);
-  }, [model.points, model.lines, model.boundaries, model.domains]);
+    return triangulateDomain(
+      model,
+      avgBoundaryElementSize !== null
+        ? { spacing: avgBoundaryElementSize }
+        : {},
+    );
+  }, [
+    model.points,
+    model.lines,
+    model.boundaries,
+    model.domains,
+    avgBoundaryElementSize,
+  ]);
   const canShowContour = postMesh !== null && postMesh.triangles.length > 0;
 
   /** Field values at every post-mesh node — Somigliana evaluation against
