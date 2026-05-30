@@ -21,6 +21,7 @@ import type { MeshElement, MeshNode } from "../elements/discretise.js";
 import { assembleHG } from "./assemble.js";
 import {
   DEFAULT_MATERIAL,
+  shearModulus,
   type MaterialProperties,
 } from "./kernels.js";
 
@@ -47,6 +48,17 @@ export function solve(
   const N = sys.nodesByIndex.length;
   const size = 2 * N;
 
+  // ── Equation scaling (psi) ────────────────────────────────────────
+  // U* ~ 1/G_mod and T* ~ 1/r, so H entries are O(1) while G entries
+  // scale like O(L / G_mod). For typical metal (G_mod ~ 1e11 Pa) the
+  // two column groups in A differ by ~10 orders of magnitude, killing
+  // the LU conditioning. Bird's MATLAB (BEMSolution.m) multiplies the
+  // G columns by a scale factor `psi` before solve and divides the
+  // recovered tractions by `psi` after; pick psi = G_mod so the G
+  // columns become O(L), much closer to H. Has zero effect on the
+  // answer in exact arithmetic, just buys the LU more dynamic range.
+  const psi = shearModulus(material);
+
   // Build the LHS A (size × size) and RHS b (size × 1) one DOF at a time.
   // For each (i, α) DOF, exactly one of u_iα and t_iα is known (NaN
   // marks the unknown). The known value contributes to b; the unknown
@@ -67,13 +79,17 @@ export function solve(
       if (uKnown === tKnown) continue;
 
       if (uKnown) {
-        // u known → unknown is t. A column = -G column. b -= H col * u.
+        // u known → unknown is t'. A column = -psi · G column.
+        // The unknown solved for is t' = t / psi; we multiply by psi
+        // at backfill below to recover the physical traction.
+        // b -= H col * u (known u is unchanged by the scaling).
         for (let row = 0; row < size; row++) {
-          A.set(row, col, -sys.G.get(row, col));
+          A.set(row, col, -psi * sys.G.get(row, col));
           b.set(row, 0, b.get(row, 0) - sys.H.get(row, col) * u);
         }
       } else {
-        // t known → unknown is u. A column = +H column. b += G col * t.
+        // t known → unknown is u. A column = +H column.
+        // b += G col * t (known t enters at full magnitude).
         for (let row = 0; row < size; row++) {
           A.set(row, col, sys.H.get(row, col));
           b.set(row, 0, b.get(row, 0) + sys.G.get(row, col) * t);
@@ -111,11 +127,14 @@ export function solve(
       const tKnown = !Number.isNaN(t);
       if (uKnown === tKnown) continue;
       const xVal = x.get(col, 0);
+      // Traction columns were scaled by `psi` in A; the corresponding
+      // unknown solved here is t' = t / psi, so multiply by psi to get
+      // the physical traction. Displacement unknowns are unscaled.
       if (alpha === 0) {
-        if (uKnown) sol.tx = xVal;
+        if (uKnown) sol.tx = xVal * psi;
         else sol.ux = xVal;
       } else {
-        if (uKnown) sol.ty = xVal;
+        if (uKnown) sol.ty = xVal * psi;
         else sol.uy = xVal;
       }
     }

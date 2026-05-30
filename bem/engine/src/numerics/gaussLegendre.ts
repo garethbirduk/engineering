@@ -19,6 +19,21 @@ export interface GaussRule {
   readonly weights: readonly number[];
 }
 
+// Process-lifetime cache of fixed-order rules. Adaptive integration
+// asks for the same handful of orders thousands of times per solve —
+// we only ever want to compute each one once.
+const RULE_CACHE = new Map<number, GaussRule>();
+
+/** Cached variant of `gaussLegendre`. Returns the same rule object on
+ *  repeated calls for the same `n`. */
+export function cachedGaussLegendre(n: number): GaussRule {
+  const hit = RULE_CACHE.get(n);
+  if (hit) return hit;
+  const rule = gaussLegendre(n);
+  RULE_CACHE.set(n, rule);
+  return rule;
+}
+
 /** Build the n-point Gauss-Legendre rule on [-1, +1]. */
 export function gaussLegendre(n: number): GaussRule {
   if (!Number.isInteger(n) || n < 1) {
