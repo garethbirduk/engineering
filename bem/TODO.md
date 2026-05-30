@@ -94,3 +94,43 @@ biaxial-specific (corner traction discontinuity) and the fix is real
 (double collocation / face-split tractions). If it's also slow, there's
 an unrelated bug in the kernel / assembly / singular integration that
 I need to find first.
+
+### Cross-check vs. Gareth's 2012 MATLAB code
+
+Looked at the MATLAB sources under `engineering/BE-SBFEM/`. Three
+relevant findings, all consistent with what we observed:
+
+- `BEMMesh.m:9-11` — three local-node schemes listed, continuous
+  `[-1, 0, 1]` is **commented out**. Active scheme is the
+  non-uniform discontinuous `[-0.5, 0, 0.5]`.
+- `BEMSolution.m:50-52` — explicit `% TO DO / continuous / so far
+  assumes discontinuous`.
+- `BEMSolution.m:108-113` — `combineContinuousColumns`: `% NB this
+  only works for complete tx=ty=0 BCs as it combines all columns /
+  TO DO / non-tx=ty=0 boundary conditions`. So even when the
+  continuous code path runs, it's documented as only correct for an
+  all-free boundary. Applied tractions break it.
+- `BEMBuildHG.m:108-112` — diagonal C is hard-coded to 0.5: `% assumes
+  C = 0.5 / TO DO / make general C`. Smooth-boundary value; corner
+  C (¼ for 90°, ¾ for re-entrant) is also a known incompleteness.
+
+Conclusion: my engine inherits the same posture as the MATLAB code —
+discontinuous default, continuous-with-applied-loads as known
+incomplete. The slow convergence I measured isn't a bug introduced by
+the port, it's the same limitation Gareth flagged in his own 2012
+code. Fixing this properly means three pieces of work, in increasing
+order of effort:
+
+1. Corner-angle-aware C diagonal (replace the assumed 0.5 / replace
+   the simple rigid-body trick at corners with a proper c_ij(s) from
+   the interior angle).
+2. Face-resolved traction DOFs at corners (shared u, split t) — the
+   minimal fix for continuous + loaded boundaries without doubling
+   collocation rows.
+3. Full double collocation at corners (two rows in H/G at the same
+   point, one per adjacent face).
+
+For now: keep the BC-merge fix that landed, recommend discontinuous
+for any geometry with sharp corners + applied tractions, and surface
+a warning in the UI when the user picks continuous on a geometry that
+has corners.
