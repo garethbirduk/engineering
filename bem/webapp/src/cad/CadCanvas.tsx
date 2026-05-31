@@ -439,12 +439,24 @@ export function CadCanvas() {
    *  For every boundary BEM element we drop perpendicular rings inward
    *  along the element's local inward normal. Rings alternate the
    *  tangential η pattern:
-   *    odd k (1, 3, 5…) → midpoints between localNodes (e.g. ±0.5 for
-   *      continuous, ±1/3 for discontinuous). 2 candidates per element.
-   *    even k (2, 4, 6…) → the localNodes themselves (e.g. -1, 0, +1).
-   *      3 per element; corner η=±1 candidates coincide with the
-   *      neighbouring element's ∓1 and get deduped by the cluster
-   *      filter, no extra cost.
+   *    odd k (1, 3, 5…) — "bridge" layer:
+   *      midpoints between consecutive localNodes, PLUS η = -1 when
+   *      localNodes don't already reach the element start. This last
+   *      bit is the discontinuous-scheme fix: with localNodes at
+   *      {-2/3, 0, +2/3} the inter-element gap (world 2L/3 → L+L/6)
+   *      isn't bridged by midpoints alone, so each element's η = -1
+   *      candidate sits on the shared corner and turns the L/3-then-
+   *      2L/3-then-L/3 alternation into a uniform L/3 spacing.
+   *      Continuous {-1, 0, +1} already reaches the endpoints, so no
+   *      η = -1 added there — pattern is just ±0.5, uniform L/2.
+   *    even k (2, 4, 6…) — "node-aligned" layer: the element's own
+   *      localNodes. Continuous candidates at η = ±1 dedup with the
+   *      neighbour's at ∓1 via the cluster filter. Discontinuous nodes
+   *      are strictly internal, no dedup needed.
+   *
+   *  Per-scheme spacings then come out uniform:
+   *    continuous   → odd L/2, even L/2 (interleaved at L/4 offset)
+   *    discontinuous → odd L/3, even L/3 (interleaved at L/6 offset)
    *  Radial depth doubles: r_k = 0.25·L · 2^(k-1), where L is the
    *  element's chord. So 0.25L, 0.5L, 1.0L, 2.0L, …
    *
@@ -501,12 +513,29 @@ export function CadCanvas() {
       return Math.hypot(a2.x - a0.x, a2.y - a0.y);
     });
 
-    // η patterns for each parity. We construct them per element because
-    // localNodes can vary (continuous vs discontinuous vs custom).
-    const midpoints = (
+    // η patterns for each parity. Constructed per element so they
+    // adapt to the element's localNodes (continuous vs discontinuous
+    // vs custom).
+    //   Odd: midpoints between consecutive localNodes, plus η = -1 if
+    //   the leftmost localNode is strictly inside (discontinuous case).
+    //   The -1 candidate sits at the world position of the element's
+    //   start — same world point as the previous element's end —
+    //   bridging the gap between elements that midpoints alone leave
+    //   open under the discontinuous scheme.
+    //   Even: the element's own localNodes. Continuous endpoints
+    //   (η = ±1) dedup against neighbour contributions via the cluster
+    //   filter; discontinuous localNodes are internal so no dedup needed.
+    const ENDPOINT_EPS = 1e-9;
+    const oddEtas = (
       ln: readonly [number, number, number],
-    ): readonly number[] => [(ln[0] + ln[1]) / 2, (ln[1] + ln[2]) / 2];
-    const nodePos = (
+    ): readonly number[] => {
+      const out: number[] = [];
+      if (ln[0] > -1 + ENDPOINT_EPS) out.push(-1);
+      out.push((ln[0] + ln[1]) / 2);
+      out.push((ln[1] + ln[2]) / 2);
+      return out;
+    };
+    const evenEtas = (
       ln: readonly [number, number, number],
     ): readonly number[] => ln;
 
@@ -530,7 +559,7 @@ export function CadCanvas() {
         const r = FIRST_RING_FACTOR * L * Math.pow(RING_GROWTH, k - 1);
         const cluster = CLUSTER_FACTOR * r;
         const cluster2 = cluster * cluster;
-        const pattern = isOdd ? midpoints(el.localNodes) : nodePos(el.localNodes);
+        const pattern = isOdd ? oddEtas(el.localNodes) : evenEtas(el.localNodes);
         const a0 = el.anchors[0];
         const a1 = el.anchors[1];
         const a2 = el.anchors[2];
