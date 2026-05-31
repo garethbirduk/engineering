@@ -49,7 +49,6 @@ import {
 } from "@bem/engine";
 import { Toolbar } from "./Toolbar.js";
 import { InfoPanel } from "./InfoPanel.js";
-import { MatrixPanel } from "./MatrixPanel.js";
 import {
   isPositiveOnlyField,
   ResultsPanel,
@@ -424,6 +423,22 @@ export function CadCanvas() {
       setSolveStats(stableSolveStatsRef.current);
     }
   }, [solvedMesh]);
+
+  // For the matrix view: turn the line selection into a set of global
+  // DOF indices (rows in H/G/u/t) that should get highlighted. The
+  // solve exposes a lineId → DOF-set map; we just union over the
+  // selected lines.
+  const matrixHighlightedDofs = useMemo<ReadonlySet<number>>(() => {
+    if (!solveStats) return new Set<number>();
+    const out = new Set<number>();
+    for (const item of selection) {
+      if (item.kind !== "line") continue;
+      const dofs = solveStats.dofsByLineId.get(item.id);
+      if (!dofs) continue;
+      for (const d of dofs) out.add(d);
+    }
+    return out;
+  }, [selection, solveStats]);
 
   /**
    * Auto-scale factor for the deformed-shape overlay. We multiply each node's
@@ -1853,16 +1868,20 @@ export function CadCanvas() {
       <div
         className="cad-main"
         style={{
-          // 5 columns by default — Inspector | resizer | canvas | resizer | Results.
-          // When the matrix panel is on, we add it after the inspector
-          // (separated by a 1px border on the panel itself, no resizer
-          // for v1 — the panel's width is fixed and content-driven).
-          gridTemplateColumns: matrixVisible
-            ? `${lhsWidth}px 6px 300px minmax(0, 1fr) 6px ${rhsWidth}px`
-            : `${lhsWidth}px 6px minmax(0, 1fr) 6px ${rhsWidth}px`,
+          // 5 columns: Inspector | resizer | canvas | resizer | Results.
+          // The matrix view, when toggled on, renders INSIDE the
+          // Inspector (resizable via the existing LHS resizer).
+          gridTemplateColumns: `${lhsWidth}px 6px minmax(0, 1fr) 6px ${rhsWidth}px`,
         }}
       >
-        <InfoPanel model={model} selection={selection} onDispatch={dispatch} />
+        <InfoPanel
+          model={model}
+          selection={selection}
+          onDispatch={dispatch}
+          matrixVisible={matrixVisible}
+          solveStats={solveStats}
+          matrixHighlightedDofs={matrixHighlightedDofs}
+        />
         <div
           className="cad-resizer"
           role="separator"
@@ -1870,7 +1889,6 @@ export function CadCanvas() {
           onMouseDown={onLhsResizerDown}
           title="Drag to resize the Inspector panel"
         />
-        {matrixVisible && <MatrixPanel solveStats={solveStats} />}
         <div className="cad-canvas-host">
           <svg
             ref={svgRef}

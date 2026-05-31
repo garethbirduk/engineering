@@ -11,8 +11,10 @@ import type {
   Id,
   LineDiscretisation,
   MaterialProperties,
+  SolveStats,
 } from "@bem/engine";
 import { resolveMaterial, shapeFunctions } from "@bem/engine";
+import { MatrixView } from "./MatrixPanel.js";
 import {
   DEFAULT_ELEMENTS_PER_LINE,
   DEFAULT_LOCAL_NODES,
@@ -40,15 +42,39 @@ interface InfoPanelProps {
   readonly model: CadModel;
   readonly selection: readonly SelectionItem[];
   readonly onDispatch: (action: CanvasAction) => void;
+  /** Whether the embedded matrix view is visible (toggled from the
+   *  toolbar). When true, the schematic renders at the top of the
+   *  Inspector body and the user can drag the LHS resizer to make
+   *  it as big as they like. */
+  readonly matrixVisible: boolean;
+  readonly solveStats: SolveStats | null;
+  /** Global DOF indices to highlight on the matrix view — derived
+   *  from the current line selection by the caller. */
+  readonly matrixHighlightedDofs: ReadonlySet<number>;
 }
 
-export function InfoPanel({ model, selection, onDispatch }: InfoPanelProps) {
+export function InfoPanel({
+  model,
+  selection,
+  onDispatch,
+  matrixVisible,
+  solveStats,
+  matrixHighlightedDofs,
+}: InfoPanelProps) {
   return (
     <aside className="cad-info" aria-label="Inspector">
       <header className="cad-info-header">
         <h2>{headerFor(selection)}</h2>
       </header>
-      <div className="cad-info-body">{renderBody(model, selection, onDispatch)}</div>
+      <div className="cad-info-body">
+        {matrixVisible && (
+          <MatrixView
+            solveStats={solveStats}
+            highlightedDofs={matrixHighlightedDofs}
+          />
+        )}
+        {renderBody(model, selection, onDispatch)}
+      </div>
     </aside>
   );
 }

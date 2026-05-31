@@ -283,33 +283,24 @@ body,
   overflow: hidden;
 }
 
-.matrix-panel {
-  border-right: 1px solid color-mix(in srgb, currentColor 15%, transparent);
-  background: color-mix(in srgb, canvas 96%, currentColor 4%);
+.matrix-view {
   display: flex;
   flex-direction: column;
-  min-height: 0;
-  overflow: hidden;
-  padding: 0.6rem 0.9rem;
-  gap: 0.6rem;
+  gap: 0.5rem;
+  padding-bottom: 0.6rem;
+  margin-bottom: 0.6rem;
+  border-bottom: 1px dashed color-mix(in srgb, currentColor 18%, transparent);
 }
 
-.matrix-panel-header h3 {
-  margin: 0;
-  font-size: 0.95rem;
+.matrix-view-title {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  opacity: 0.7;
   font-weight: 600;
-  padding-bottom: 0.4rem;
-  border-bottom: 1px solid color-mix(in srgb, currentColor 12%, transparent);
 }
 
-.matrix-panel-body {
-  display: flex;
-  flex-direction: column;
-  gap: 0.7rem;
-  overflow-y: auto;
-}
-
-.matrix-panel-empty {
+.matrix-view-empty {
   margin: 0;
   font-size: 0.85rem;
   opacity: 0.65;
