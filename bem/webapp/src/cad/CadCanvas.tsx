@@ -341,6 +341,7 @@ export function CadCanvas() {
     internalNodesVisible,
     interiorField,
     matrixVisible,
+    labelsVisible,
   } = state;
 
   // Reducer is pure but startDragForHit composes selection + dragSession;
@@ -1941,6 +1942,58 @@ export function CadCanvas() {
   const meshStroke = view.width * 0.0016;
   const meshNodeRadius = view.width * 0.005;
   const meshEndTickLen = view.width * 0.008;
+  const labelFontSize = view.width * 0.013;
+  const labelNodeFontSize = view.width * 0.007;
+  const labelOutwardOffset = view.width * 0.018;
+
+  // Per-element address (D{domain} B{boundary} L{line-in-boundary} E{el}).
+  // Domain index = 1-based position of the domain containing the boundary
+  // that contains this element's line.
+  // Boundary index = 1-based position of the boundary that contains a
+  // segment referencing this lineId.
+  // Line index = 1-based position of this lineId within that boundary's
+  // segments list.
+  // Element index = el.indexInLine + 1.
+  // Lines NOT referenced by any boundary fall back to "L{lineIdx}|E{idx}"
+  // (using their position in model.lines), with D/B blank.
+  const elementLabels = useMemo(() => {
+    const lineToBoundary = new Map<
+      string,
+      { boundaryIdx: number; lineIdxInBoundary: number }
+    >();
+    model.boundaries.forEach((b, bIdx) => {
+      b.segments.forEach((seg, sIdx) => {
+        if (!lineToBoundary.has(seg.lineId)) {
+          lineToBoundary.set(seg.lineId, {
+            boundaryIdx: bIdx + 1,
+            lineIdxInBoundary: sIdx + 1,
+          });
+        }
+      });
+    });
+    const boundaryToDomain = new Map<string, number>();
+    model.domains.forEach((d, dIdx) => {
+      for (const bId of d.boundaryIds) {
+        if (!boundaryToDomain.has(bId)) boundaryToDomain.set(bId, dIdx + 1);
+      }
+    });
+    const lineIdxFallback = new Map(
+      model.lines.map((l, i) => [l.id, i + 1] as const),
+    );
+    return meshElements.map((el) => {
+      const bm = lineToBoundary.get(el.lineId);
+      const boundary = bm ? model.boundaries[bm.boundaryIdx - 1] : undefined;
+      const domainIdx = boundary ? boundaryToDomain.get(boundary.id) : undefined;
+      const parts: string[] = [];
+      if (domainIdx !== undefined) parts.push(`D${domainIdx}`);
+      if (bm) parts.push(`B${bm.boundaryIdx}`);
+      parts.push(
+        bm ? `L${bm.lineIdxInBoundary}` : `L${lineIdxFallback.get(el.lineId) ?? "?"}`,
+      );
+      parts.push(`E${el.indexInLine + 1}`);
+      return parts.join(" ");
+    });
+  }, [meshElements, model.lines, model.boundaries, model.domains]);
 
   // ── rubber-band preview for new-line draft ─────────────────────────────
 
@@ -1990,6 +2043,7 @@ export function CadCanvas() {
         internalNodesVisible={internalNodesVisible}
         canShowInternalNodes={canShowInternalNodes}
         matrixVisible={matrixVisible}
+        labelsVisible={labelsVisible}
         selectionSummary={selectionSummary}
         solveStats={solveStats}
         onCreateDomain={() => dispatch({ type: "createDomainFromSelection" })}
@@ -1998,6 +2052,7 @@ export function CadCanvas() {
         onToggleResults={() => dispatch({ type: "toggleResults" })}
         onToggleInternalNodes={() => dispatch({ type: "toggleInternalNodes" })}
         onToggleMatrix={() => dispatch({ type: "toggleMatrix" })}
+        onToggleLabels={() => dispatch({ type: "toggleLabels" })}
         onSave={handleSave}
         onLoad={handleLoad}
         onNew={handleNew}
@@ -2466,6 +2521,103 @@ export function CadCanvas() {
                           strokeLinecap="round"
                         />
                         {nodeCircles}
+                      </g>,
+                    ];
+                  })}
+                </g>
+              )}
+
+              {/* Debug labels overlay (toggled). For each element draws
+                  the D/B/L/E address tag offset outward from the
+                  midpoint anchor, and the local node index (1, 2, 3)
+                  centred on each node. Y is flipped per-text so glyphs
+                  stay upright in our y-up world frame. */}
+              {labelsVisible && (
+                <g pointerEvents="none">
+                  {meshElements.flatMap((el, elIdx) => {
+                    const line = model.lines.find((l) => l.id === el.lineId);
+                    if (!line) return [];
+                    const lineStart = pointsById.get(line.startId);
+                    const lineEnd = pointsById.get(line.endId);
+                    if (!lineStart || !lineEnd) return [];
+                    const centre = line.arcCentreId
+                      ? pointsById.get(line.arcCentreId)
+                      : undefined;
+                    // Right-of-direction normal at the element midpoint,
+                    // matching the BEM outward-normal convention (CCW
+                    // loops → outward; CW loops → inward, which is fine
+                    // for a debug label).
+                    const t = (el.tStart + el.tEnd) / 2;
+                    let nx = 0;
+                    let ny = 0;
+                    if (centre) {
+                      const p = arcPoint(lineStart, lineEnd, centre, t);
+                      const rx = p.x - centre.x;
+                      const ry = p.y - centre.y;
+                      const rl = Math.hypot(rx, ry) || 1;
+                      const cdx = lineEnd.x - lineStart.x;
+                      const cdy = lineEnd.y - lineStart.y;
+                      let tdx = -ry / rl;
+                      let tdy = rx / rl;
+                      if (tdx * cdx + tdy * cdy < 0) {
+                        tdx = -tdx;
+                        tdy = -tdy;
+                      }
+                      nx = tdy;
+                      ny = -tdx;
+                    } else {
+                      const dx = lineEnd.x - lineStart.x;
+                      const dy = lineEnd.y - lineStart.y;
+                      const dl = Math.hypot(dx, dy) || 1;
+                      nx = dy / dl;
+                      ny = -dx / dl;
+                    }
+                    const mid = el.anchors[1];
+                    const lx = mid.x + nx * labelOutwardOffset;
+                    const ly = mid.y + ny * labelOutwardOffset;
+                    const label = elementLabels[elIdx] ?? "";
+                    return [
+                      <g key={`lbl-${el.lineId}-${el.indexInLine}`}>
+                        {/* Element address: y-flipped because the parent
+                            SVG flips world Y to put y-up on screen. */}
+                        <text
+                          x={lx}
+                          y={ly}
+                          fontSize={labelFontSize}
+                          fontFamily="var(--font-mono, monospace)"
+                          fontWeight={600}
+                          fill="var(--mesh)"
+                          textAnchor="middle"
+                          dominantBaseline="central"
+                          transform={`scale(1,-1) translate(0,${-2 * ly})`}
+                          paintOrder="stroke"
+                          stroke="canvas"
+                          strokeWidth={labelFontSize * 0.18}
+                          strokeLinejoin="round"
+                        >
+                          {label}
+                        </text>
+                        {/* Local node indices 1, 2, 3 centred on each node. */}
+                        {el.nodes.map((n, i) => (
+                          <text
+                            key={`nlbl-${i}`}
+                            x={n.x}
+                            y={n.y}
+                            fontSize={labelNodeFontSize}
+                            fontFamily="var(--font-mono, monospace)"
+                            fontWeight={700}
+                            fill="var(--mesh)"
+                            textAnchor="middle"
+                            dominantBaseline="central"
+                            transform={`scale(1,-1) translate(0,${-2 * n.y})`}
+                            paintOrder="stroke"
+                            stroke="canvas"
+                            strokeWidth={labelNodeFontSize * 0.18}
+                            strokeLinejoin="round"
+                          >
+                            {i + 1}
+                          </text>
+                        ))}
                       </g>,
                     ];
                   })}

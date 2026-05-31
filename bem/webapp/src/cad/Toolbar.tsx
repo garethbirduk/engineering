@@ -15,6 +15,7 @@ interface ToolbarProps {
   readonly internalNodesVisible: boolean;
   readonly canShowInternalNodes: boolean;
   readonly matrixVisible: boolean;
+  readonly labelsVisible: boolean;
   readonly selectionSummary: string;
   readonly solveStats: SolveStats | null;
   readonly onCreateDomain: () => void;
@@ -23,6 +24,7 @@ interface ToolbarProps {
   readonly onToggleResults: () => void;
   readonly onToggleInternalNodes: () => void;
   readonly onToggleMatrix: () => void;
+  readonly onToggleLabels: () => void;
   readonly onSave: () => void;
   readonly onLoad: () => void;
   readonly onNew: () => void;
@@ -84,6 +86,7 @@ export function Toolbar({
   internalNodesVisible,
   canShowInternalNodes,
   matrixVisible,
+  labelsVisible,
   selectionSummary,
   solveStats,
   onCreateDomain,
@@ -92,6 +95,7 @@ export function Toolbar({
   onToggleResults,
   onToggleInternalNodes,
   onToggleMatrix,
+  onToggleLabels,
   onSave,
   onLoad,
   onNew,
@@ -171,6 +175,15 @@ export function Toolbar({
         title="Show / hide the BEM system-matrix schematic panel"
       >
         Matrix
+      </button>
+      <button
+        type="button"
+        className={`cad-tool ${labelsVisible ? "cad-tool--active" : ""}`}
+        onClick={onToggleLabels}
+        aria-pressed={labelsVisible}
+        title="Show / hide D/B/L/E element address labels + local node numbers"
+      >
+        Labels
       </button>
       <div className="cad-toolgroup-sep" aria-hidden="true" />
       <div className="cad-toolgroup" aria-label="File">

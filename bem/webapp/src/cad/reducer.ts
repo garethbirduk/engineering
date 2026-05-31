@@ -107,6 +107,11 @@ export interface CanvasState {
    *  the canvas) is shown. Lets the user see the H·u = G·t schematic
    *  for the current BEM system size. */
   readonly matrixVisible: boolean;
+  /** Debug overlay: when on, label each mesh element with its
+   *  D{domain} B{boundary} L{line} E{element} address and the local
+   *  node index (1, 2, 3) inside each node circle. Useful for
+   *  diagnosing boundary-traversal order and indexing bugs. */
+  readonly labelsVisible: boolean;
 }
 
 /** Geometric parameters needed to interpret a click/double-click. */
@@ -170,6 +175,7 @@ export type CanvasAction =
   | { readonly type: "toggleResults" }
   | { readonly type: "toggleInternalNodes" }
   | { readonly type: "toggleMatrix" }
+  | { readonly type: "toggleLabels" }
   | {
       readonly type: "setInteriorField";
       readonly field: CanvasState["interiorField"];
@@ -189,6 +195,7 @@ export const INITIAL_STATE: CanvasState = {
   internalNodesVisible: false,
   interiorField: null,
   matrixVisible: false,
+  labelsVisible: false,
 };
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -276,6 +283,9 @@ export function canvasReducer(
 
     case "toggleMatrix":
       return { ...state, matrixVisible: !state.matrixVisible };
+
+    case "toggleLabels":
+      return { ...state, labelsVisible: !state.labelsVisible };
 
     case "setInteriorField":
       return { ...state, interiorField: action.field };
