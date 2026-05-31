@@ -368,15 +368,38 @@ export function CadCanvas() {
   // contribution. The solveStatsRef captures hit/miss/Gauss-eval
   // counts side-channel; we promote it to React state for the toolbar
   // via an effect below.
+  //
+  // StrictMode caveat: in dev React double-invokes useMemo callbacks
+  // back-to-back with the same deps. The second invocation finds the
+  // cache fully warm from the first → all hits → stats show 100%
+  // cached. To avoid that misleading display, only let the FIRST
+  // invocation per dep-change overwrite the displayed stats. The
+  // double-invoke uses the same dep references, so a ref-equality
+  // check catches it cleanly.
   const solveStatsRef = useRef<{ value?: SolveStats }>({});
+  const lastSolveDepsRef = useRef<{
+    mesh: readonly MeshElement[];
+    mat: MaterialProperties;
+  } | null>(null);
+  const stableSolveStatsRef = useRef<SolveStats | null>(null);
   const solvedMesh = useMemo(() => {
     solveStatsRef.current = {};
-    return solve(
+    const result = solve(
       meshElements,
       material,
       blockCacheRef.current,
       solveStatsRef.current,
     );
+    const prev = lastSolveDepsRef.current;
+    const sameAsPrev =
+      prev !== null && prev.mesh === meshElements && prev.mat === material;
+    if (!sameAsPrev) {
+      lastSolveDepsRef.current = { mesh: meshElements, mat: material };
+      if (solveStatsRef.current.value) {
+        stableSolveStatsRef.current = solveStatsRef.current.value;
+      }
+    }
+    return result;
   }, [meshElements, material]);
 
   // Promote the solver's latest stats into React state so the toolbar
@@ -384,8 +407,8 @@ export function CadCanvas() {
   // toolbar reactive without coupling the BEM solve to React internals.
   const [solveStats, setSolveStats] = useState<SolveStats | null>(null);
   useEffect(() => {
-    if (solveStatsRef.current.value) {
-      setSolveStats(solveStatsRef.current.value);
+    if (stableSolveStatsRef.current) {
+      setSolveStats(stableSolveStatsRef.current);
     }
   }, [solvedMesh]);
 
