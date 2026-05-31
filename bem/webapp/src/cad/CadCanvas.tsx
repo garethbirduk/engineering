@@ -396,7 +396,18 @@ export function CadCanvas() {
     if (!sameAsPrev) {
       lastSolveDepsRef.current = { mesh: meshElements, mat: material };
       if (solveStatsRef.current.value) {
-        stableSolveStatsRef.current = solveStatsRef.current.value;
+        // Don't overwrite a meaningful display with a "no work done"
+        // update — those happen when a re-solve fires for a mesh whose
+        // element content is unchanged from a previous solve (e.g. a
+        // drag-back-to-original-position), so every pair hits cache.
+        // Tooltip's "100% cached, 0 G-evals" pill would clobber the
+        // last real reanalysis numbers. Keep the prior display in that
+        // case so the user can still see what work the last EDIT did.
+        const v = solveStatsRef.current.value;
+        const noWork = v.assemble.misses === 0 && v.assemble.gaussEvals === 0;
+        if (!noWork || stableSolveStatsRef.current === null) {
+          stableSolveStatsRef.current = v;
+        }
       }
     }
     return result;

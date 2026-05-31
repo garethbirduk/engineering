@@ -679,6 +679,16 @@ function updatePointPosition(
   pointId: Id,
   position: Vec2,
 ): CanvasState {
+  // Early-return when the snapped cursor lands on the point's current
+  // coords — mousemove fires constantly during a drag and most events
+  // snap back to the cell we're already in. Returning the same state
+  // object means React skips the re-render and the BEM solve doesn't
+  // pointlessly re-run on a content-identical mesh (which would then
+  // show "100% cached, 0 G-evals" in the toolbar, overwriting the
+  // meaningful reanalysis numbers from the actual move).
+  const current = state.model.points.find((p) => p.id === pointId);
+  if (!current) return state;
+  if (current.x === position.x && current.y === position.y) return state;
   return {
     ...state,
     model: {
