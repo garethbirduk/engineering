@@ -125,6 +125,11 @@ export interface AssembleStats {
    *  Dominant cost of the assemble step (each eval = one kernel + one
    *  2×6 scatter contribution). 0 when everything hit the cache. */
   readonly gaussEvals: number;
+  /** Unique mesh nodes after dedup. H and G are (2 × nodeCount) ×
+   *  (2 × nodeCount) matrices. */
+  readonly nodeCount: number;
+  /** Element count this mesh. hits + misses = nodeCount × elementCount. */
+  readonly elementCount: number;
 }
 
 /** Position-based dedup key. Nodes within POS_EPS of each other share an index. */
@@ -383,6 +388,12 @@ export function assembleHG(
     nodeIndexByKey: registry.nodeIndexByKey,
     nodesByIndex: registry.nodesByIndex,
     elementNodeIndex: registry.elementNodeIndex,
-    stats: { hits, misses, gaussEvals: integStats.gaussEvals },
+    stats: {
+      hits,
+      misses,
+      gaussEvals: integStats.gaussEvals,
+      nodeCount: N,
+      elementCount: mesh.length,
+    },
   };
 }

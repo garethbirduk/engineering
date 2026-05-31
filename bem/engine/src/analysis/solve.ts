@@ -59,7 +59,13 @@ export function solve(
   if (mesh.length === 0) {
     if (statsOut) {
       statsOut.value = {
-        assemble: { hits: 0, misses: 0, gaussEvals: 0 },
+        assemble: {
+          hits: 0,
+          misses: 0,
+          gaussEvals: 0,
+          nodeCount: 0,
+          elementCount: 0,
+        },
         unknownDofs: 0,
       };
     }

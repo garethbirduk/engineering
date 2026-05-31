@@ -103,6 +103,10 @@ export interface CanvasState {
     | "s2"
     | "tmax"
     | null;
+  /** Whether the matrix-visualisation panel (between the Inspector and
+   *  the canvas) is shown. Lets the user see the H·u = G·t schematic
+   *  for the current BEM system size. */
+  readonly matrixVisible: boolean;
 }
 
 /** Geometric parameters needed to interpret a click/double-click. */
@@ -165,6 +169,7 @@ export type CanvasAction =
   | { readonly type: "toggleMesh" }
   | { readonly type: "toggleResults" }
   | { readonly type: "toggleInternalNodes" }
+  | { readonly type: "toggleMatrix" }
   | {
       readonly type: "setInteriorField";
       readonly field: CanvasState["interiorField"];
@@ -183,6 +188,7 @@ export const INITIAL_STATE: CanvasState = {
   resultsVisible: false,
   internalNodesVisible: false,
   interiorField: null,
+  matrixVisible: false,
 };
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -267,6 +273,9 @@ export function canvasReducer(
 
     case "toggleInternalNodes":
       return { ...state, internalNodesVisible: !state.internalNodesVisible };
+
+    case "toggleMatrix":
+      return { ...state, matrixVisible: !state.matrixVisible };
 
     case "setInteriorField":
       return { ...state, interiorField: action.field };

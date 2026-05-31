@@ -14,6 +14,7 @@ interface ToolbarProps {
   readonly canShowResults: boolean;
   readonly internalNodesVisible: boolean;
   readonly canShowInternalNodes: boolean;
+  readonly matrixVisible: boolean;
   readonly selectionSummary: string;
   readonly solveStats: SolveStats | null;
   readonly onCreateDomain: () => void;
@@ -21,6 +22,7 @@ interface ToolbarProps {
   readonly onToggleMesh: () => void;
   readonly onToggleResults: () => void;
   readonly onToggleInternalNodes: () => void;
+  readonly onToggleMatrix: () => void;
   readonly onSave: () => void;
   readonly onLoad: () => void;
   readonly onNew: () => void;
@@ -81,6 +83,7 @@ export function Toolbar({
   canShowResults,
   internalNodesVisible,
   canShowInternalNodes,
+  matrixVisible,
   selectionSummary,
   solveStats,
   onCreateDomain,
@@ -88,6 +91,7 @@ export function Toolbar({
   onToggleMesh,
   onToggleResults,
   onToggleInternalNodes,
+  onToggleMatrix,
   onSave,
   onLoad,
   onNew,
@@ -158,6 +162,15 @@ export function Toolbar({
         }
       >
         Boundary results
+      </button>
+      <button
+        type="button"
+        className={`cad-tool ${matrixVisible ? "cad-tool--active" : ""}`}
+        onClick={onToggleMatrix}
+        aria-pressed={matrixVisible}
+        title="Show / hide the BEM system-matrix schematic panel"
+      >
+        Matrix
       </button>
       <div className="cad-toolgroup-sep" aria-hidden="true" />
       <div className="cad-toolgroup" aria-label="File">

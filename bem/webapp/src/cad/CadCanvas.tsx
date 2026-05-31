@@ -49,6 +49,7 @@ import {
 } from "@bem/engine";
 import { Toolbar } from "./Toolbar.js";
 import { InfoPanel } from "./InfoPanel.js";
+import { MatrixPanel } from "./MatrixPanel.js";
 import {
   isPositiveOnlyField,
   ResultsPanel,
@@ -289,6 +290,7 @@ export function CadCanvas() {
     resultsVisible,
     internalNodesVisible,
     interiorField,
+    matrixVisible,
   } = state;
 
   // Reducer is pure but startDragForHit composes selection + dragSession;
@@ -1835,6 +1837,7 @@ export function CadCanvas() {
         canShowResults={canShowResults}
         internalNodesVisible={internalNodesVisible}
         canShowInternalNodes={canShowInternalNodes}
+        matrixVisible={matrixVisible}
         selectionSummary={selectionSummary}
         solveStats={solveStats}
         onCreateDomain={() => dispatch({ type: "createDomainFromSelection" })}
@@ -1842,6 +1845,7 @@ export function CadCanvas() {
         onToggleMesh={() => dispatch({ type: "toggleMesh" })}
         onToggleResults={() => dispatch({ type: "toggleResults" })}
         onToggleInternalNodes={() => dispatch({ type: "toggleInternalNodes" })}
+        onToggleMatrix={() => dispatch({ type: "toggleMatrix" })}
         onSave={handleSave}
         onLoad={handleLoad}
         onNew={handleNew}
@@ -1849,7 +1853,13 @@ export function CadCanvas() {
       <div
         className="cad-main"
         style={{
-          gridTemplateColumns: `${lhsWidth}px 6px minmax(0, 1fr) 6px ${rhsWidth}px`,
+          // 5 columns by default — Inspector | resizer | canvas | resizer | Results.
+          // When the matrix panel is on, we add it after the inspector
+          // (separated by a 1px border on the panel itself, no resizer
+          // for v1 — the panel's width is fixed and content-driven).
+          gridTemplateColumns: matrixVisible
+            ? `${lhsWidth}px 6px 300px minmax(0, 1fr) 6px ${rhsWidth}px`
+            : `${lhsWidth}px 6px minmax(0, 1fr) 6px ${rhsWidth}px`,
         }}
       >
         <InfoPanel model={model} selection={selection} onDispatch={dispatch} />
@@ -1860,6 +1870,7 @@ export function CadCanvas() {
           onMouseDown={onLhsResizerDown}
           title="Drag to resize the Inspector panel"
         />
+        {matrixVisible && <MatrixPanel solveStats={solveStats} />}
         <div className="cad-canvas-host">
           <svg
             ref={svgRef}
