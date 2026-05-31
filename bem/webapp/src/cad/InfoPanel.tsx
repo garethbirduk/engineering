@@ -49,8 +49,12 @@ interface InfoPanelProps {
   readonly matrixVisible: boolean;
   readonly solveStats: SolveStats | null;
   /** Global DOF indices to highlight on the matrix view — derived
-   *  from the current line selection by the caller. */
+   *  from the current line selection by the caller. Renders yellow. */
   readonly matrixHighlightedDofs: ReadonlySet<number>;
+  /** Element-hover DOFs (6 per element). When non-empty these REPLACE
+   *  the line-selection yellow with orange, so the user sees the
+   *  drilled-down element scope only while hovering. */
+  readonly matrixHoveredDofs: ReadonlySet<number>;
 }
 
 export function InfoPanel({
@@ -60,6 +64,7 @@ export function InfoPanel({
   matrixVisible,
   solveStats,
   matrixHighlightedDofs,
+  matrixHoveredDofs,
 }: InfoPanelProps) {
   return (
     <aside className="cad-info" aria-label="Inspector">
@@ -71,6 +76,7 @@ export function InfoPanel({
           <MatrixView
             solveStats={solveStats}
             highlightedDofs={matrixHighlightedDofs}
+            hoveredDofs={matrixHoveredDofs}
           />
         )}
         {renderBody(model, selection, onDispatch)}

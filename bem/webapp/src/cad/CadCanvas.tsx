@@ -195,6 +195,23 @@ function pointInPolygon(p: Vec2, poly: readonly Vec2[]): boolean {
   return inside;
 }
 
+/** Squared distance from point `p` to the line segment a→b. Standard
+ *  projection onto the segment, clamped to [0, 1]. Used for element
+ *  hover hit-testing (each element's straight chord). */
+function pointToSegmentSq(p: Vec2, a: Vec2, b: Vec2): number {
+  const dx = b.x - a.x;
+  const dy = b.y - a.y;
+  const lenSq = dx * dx + dy * dy;
+  let t = lenSq === 0 ? 0 : ((p.x - a.x) * dx + (p.y - a.y) * dy) / lenSq;
+  if (t < 0) t = 0;
+  else if (t > 1) t = 1;
+  const cx = a.x + t * dx;
+  const cy = a.y + t * dy;
+  const ex = p.x - cx;
+  const ey = p.y - cy;
+  return ex * ex + ey * ey;
+}
+
 /** Squared distance from point `p` to the polyline made of `poly`'s
  *  segments (closed: edge wraps from last → first). */
 function minSqDistToPolygonEdges(p: Vec2, poly: readonly Vec2[]): number {
@@ -277,6 +294,15 @@ export function CadCanvas() {
   const [state, dispatch] = useReducer(canvasReducer, INITIAL_STATE);
   const [cursorWorld, setCursorWorld] = useState<Vec2 | null>(null);
   const [snap, setSnap] = useState<ReturnType<typeof snapWorld> | null>(null);
+  // Hover state for the matrix view's element-level highlight. The ref
+  // shadows the state so the change-detection in onMouseMove doesn't
+  // need to depend on React's re-render cycle — set the ref first, then
+  // call setHoveredElementKey only when the value actually changed,
+  // which throttles re-renders to once per element transition.
+  const [hoveredElementKey, setHoveredElementKey] = useState<string | null>(
+    null,
+  );
+  const hoveredElementKeyRef = useRef<string | null>(null);
   const [lhsWidth, setLhsWidth] = useState(320);
   const [rhsWidth, setRhsWidth] = useState(260);
 
@@ -439,6 +465,16 @@ export function CadCanvas() {
     }
     return out;
   }, [selection, solveStats]);
+
+  // Hovering a mesh element narrows the matrix highlight to JUST that
+  // element's 6 DOFs. When a hovered key is present, the orange "hover"
+  // set displaces the yellow line-selection set on the matrix view.
+  const matrixHoveredDofs = useMemo<ReadonlySet<number>>(() => {
+    if (!solveStats || hoveredElementKey === null) {
+      return new Set<number>();
+    }
+    return solveStats.dofsByElement.get(hoveredElementKey) ?? new Set();
+  }, [hoveredElementKey, solveStats]);
 
   /**
    * Auto-scale factor for the deformed-shape overlay. We multiply each node's
@@ -1452,6 +1488,30 @@ export function CadCanvas() {
       setCursorWorld(world);
       setSnap(snapWorld(world, model.points, gridStep, snapRadius));
 
+      // Mesh-element hover, for the matrix view. We only compute when
+      // the matrix view is on (otherwise it's wasted work — no UI
+      // consumer). Hit-test against each element's chord; pick the
+      // closest within lineTolerance. setState only fires on a CHANGE
+      // of the hovered element, so mousemove spam doesn't cause a
+      // re-render storm.
+      if (matrixVisible) {
+        let bestKey: string | null = null;
+        let bestSq = lineTolerance * lineTolerance;
+        for (const el of meshElements) {
+          const a = el.anchors[0];
+          const b = el.anchors[2];
+          const sq = pointToSegmentSq(world, a, b);
+          if (sq < bestSq) {
+            bestSq = sq;
+            bestKey = `${el.lineId}|${el.indexInLine}`;
+          }
+        }
+        if (bestKey !== hoveredElementKeyRef.current) {
+          hoveredElementKeyRef.current = bestKey;
+          setHoveredElementKey(bestKey);
+        }
+      }
+
       // Click→drag transition: when movement crosses the threshold for the
       // first time, decide which gesture this is:
       //   - mousedown was on a Point/Line (no shift) → drag the entity
@@ -1537,7 +1597,17 @@ export function CadCanvas() {
         cy: pan.startView.cy + dyWorld,
       });
     },
-    [view, model.points, gridStep, snapRadius, makeCtx, marquee],
+    [
+      view,
+      model.points,
+      gridStep,
+      snapRadius,
+      makeCtx,
+      marquee,
+      matrixVisible,
+      meshElements,
+      lineTolerance,
+    ],
   );
 
   // ── mouse up ───────────────────────────────────────────────────────────
@@ -1607,6 +1677,12 @@ export function CadCanvas() {
     setCursorWorld(null);
     setSnap(null);
     setMarquee(null);
+    // Clear any element hover when the cursor leaves the canvas, so
+    // the matrix view reverts to the line-selection highlight.
+    if (hoveredElementKeyRef.current !== null) {
+      hoveredElementKeyRef.current = null;
+      setHoveredElementKey(null);
+    }
     if (stateRef.current.dragSession || stateRef.current.newLineDraft) {
       const cursor = cursorWorld ?? { x: 0, y: 0 };
       dispatch({ type: "endDrag", cursor, ctx: makeCtx(cursor) });
@@ -1881,6 +1957,7 @@ export function CadCanvas() {
           matrixVisible={matrixVisible}
           solveStats={solveStats}
           matrixHighlightedDofs={matrixHighlightedDofs}
+          matrixHoveredDofs={matrixHoveredDofs}
         />
         <div
           className="cad-resizer"

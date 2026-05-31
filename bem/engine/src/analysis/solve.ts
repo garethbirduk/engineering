@@ -34,12 +34,17 @@ export { DEFAULT_MATERIAL, type MaterialProperties };
 /** Work-done summary for a single solve. `assemble` mirrors
  *  AssembleStats; `unknownDofs` is the size of the linear system the
  *  LU solver actually saw (rough proxy for LU cost ≈ N³/3);
- *  `dofsByLineId` maps each line's id to the set of global DOF
- *  indices (rows in H, G, u, t) its element-nodes occupy. */
+ *  `dofsByLineId` / `dofsByElement` map line and element identifiers
+ *  to the set of global DOF indices (rows in H, G, u, t) their nodes
+ *  occupy — used by the matrix view for highlight overlays. The
+ *  element map is keyed by `${lineId}|${indexInLine}` so it remains
+ *  stable across re-discretisations that create fresh MeshElement
+ *  object references. */
 export interface SolveStats {
   readonly assemble: AssembleStats;
   readonly unknownDofs: number;
   readonly dofsByLineId: ReadonlyMap<string, ReadonlySet<number>>;
+  readonly dofsByElement: ReadonlyMap<string, ReadonlySet<number>>;
 }
 
 /**
@@ -71,6 +76,7 @@ export function solve(
         },
         unknownDofs: 0,
         dofsByLineId: new Map(),
+        dofsByElement: new Map(),
       };
     }
     return [];
@@ -85,18 +91,23 @@ export function solve(
   // of H, G, u, t when the user selects a line — given a lineId we
   // know exactly which slices of the system belong to it.
   const dofsByLineId = new Map<string, Set<number>>();
+  const dofsByElement = new Map<string, Set<number>>();
   for (const el of mesh) {
     const idxs = sys.elementNodeIndex.get(el);
     if (!idxs) continue;
-    let set = dofsByLineId.get(el.lineId);
-    if (!set) {
-      set = new Set();
-      dofsByLineId.set(el.lineId, set);
+    let lineSet = dofsByLineId.get(el.lineId);
+    if (!lineSet) {
+      lineSet = new Set();
+      dofsByLineId.set(el.lineId, lineSet);
     }
+    const elSet = new Set<number>();
+    dofsByElement.set(`${el.lineId}|${el.indexInLine}`, elSet);
     for (let k = 0; k < 3; k++) {
       const gi = idxs[k]!;
-      set.add(2 * gi);
-      set.add(2 * gi + 1);
+      lineSet.add(2 * gi);
+      lineSet.add(2 * gi + 1);
+      elSet.add(2 * gi);
+      elSet.add(2 * gi + 1);
     }
   }
 
@@ -158,7 +169,12 @@ export function solve(
     // Singular / unsolvable — return the input mesh untouched so the
     // viz layer just shows no displacement overlay.
     if (statsOut) {
-      statsOut.value = { assemble: sys.stats, unknownDofs: 0, dofsByLineId };
+      statsOut.value = {
+        assemble: sys.stats,
+        unknownDofs: 0,
+        dofsByLineId,
+        dofsByElement,
+      };
     }
     return mesh.map((el) => ({ ...el }));
   }
@@ -177,7 +193,12 @@ export function solve(
     }
   }
   if (statsOut) {
-    statsOut.value = { assemble: sys.stats, unknownDofs, dofsByLineId };
+    statsOut.value = {
+      assemble: sys.stats,
+      unknownDofs,
+      dofsByLineId,
+      dofsByElement,
+    };
   }
 
   // Backfill per-node solved DOFs into a flat array indexed by global node.

@@ -24,17 +24,29 @@ import type { SolveStats } from "@bem/engine";
 
 interface MatrixViewProps {
   readonly solveStats: SolveStats | null;
-  /** Global DOF indices (0 .. 2·nodeCount-1) to highlight. Empty Set
-   *  = no highlight, just the raw schematic. */
+  /** DOFs from the current line selection. Rendered yellow when no
+   *  hover is active. */
   readonly highlightedDofs: ReadonlySet<number>;
+  /** DOFs from the element currently under the cursor (6 per element).
+   *  When non-empty, REPLACES the yellow line highlight with orange
+   *  so the user sees just the element's scope while hovering. */
+  readonly hoveredDofs: ReadonlySet<number>;
 }
 
-export function MatrixView({ solveStats, highlightedDofs }: MatrixViewProps) {
+export function MatrixView({
+  solveStats,
+  highlightedDofs,
+  hoveredDofs,
+}: MatrixViewProps) {
   return (
     <div className="matrix-view" aria-label="System matrix">
       <div className="matrix-view-title">System matrix</div>
       {solveStats && solveStats.assemble.nodeCount > 0 ? (
-        <MatrixSchematic stats={solveStats} highlightedDofs={highlightedDofs} />
+        <MatrixSchematic
+          stats={solveStats}
+          highlightedDofs={highlightedDofs}
+          hoveredDofs={hoveredDofs}
+        />
       ) : (
         <p className="matrix-view-empty">
           Add a domain with boundary conditions to assemble the system.
@@ -47,9 +59,11 @@ export function MatrixView({ solveStats, highlightedDofs }: MatrixViewProps) {
 function MatrixSchematic({
   stats,
   highlightedDofs,
+  hoveredDofs,
 }: {
   readonly stats: SolveStats;
   readonly highlightedDofs: ReadonlySet<number>;
+  readonly hoveredDofs: ReadonlySet<number>;
 }) {
   const N = stats.assemble.nodeCount;
   const size = 2 * N; // matrix side length in DOFs
@@ -82,12 +96,21 @@ function MatrixSchematic({
   const COLOR_G = "rgb(59, 130, 246)"; // blue
   const COLOR_T = "rgb(239, 68, 68)"; // red
   const COLOR_HIGHLIGHT = "rgba(255, 235, 59, 0.78)"; // semi-translucent yellow
+  const COLOR_HOVER = "rgba(249, 115, 22, 0.85)"; // semi-translucent orange
   const STROKE = "rgb(0, 0, 0)";
+
+  // When the user is hovering a specific mesh element, its 6 DOFs
+  // REPLACE the line-selection yellow with orange. That way the user
+  // sees the narrower (element-level) scope while hovering and the
+  // broader (line-level) scope while not.
+  const showHover = hoveredDofs.size > 0;
+  const activeDofs = showHover ? hoveredDofs : highlightedDofs;
+  const activeFill = showHover ? COLOR_HOVER : COLOR_HIGHLIGHT;
 
   // Build merged DOF runs so adjacent highlighted DOFs render as one
   // tall stripe instead of many sliver ones — keeps the SVG small AND
   // avoids sub-pixel gaps between stripes.
-  const runs = mergeRuns(highlightedDofs, size);
+  const runs = mergeRuns(activeDofs, size);
 
   // Per-DOF pixel size on each axis.
   const dofRow = squareH / size;
@@ -120,7 +143,7 @@ function MatrixSchematic({
             y={matY + r.start * dofRow}
             width={squareW}
             height={r.length * dofRow}
-            fill={COLOR_HIGHLIGHT}
+            fill={activeFill}
           />
         ))}
         {runs.map((r, i) => (
@@ -130,7 +153,7 @@ function MatrixSchematic({
             y={matY}
             width={r.length * dofCol}
             height={squareH}
-            fill={COLOR_HIGHLIGHT}
+            fill={activeFill}
           />
         ))}
 
@@ -151,7 +174,7 @@ function MatrixSchematic({
             y={matY + r.start * dofRow}
             width={vecW}
             height={r.length * dofRow}
-            fill={COLOR_HIGHLIGHT}
+            fill={activeFill}
           />
         ))}
         <text
@@ -201,7 +224,7 @@ function MatrixSchematic({
             y={matY + r.start * dofRow}
             width={squareW}
             height={r.length * dofRow}
-            fill={COLOR_HIGHLIGHT}
+            fill={activeFill}
           />
         ))}
         {runs.map((r, i) => (
@@ -211,7 +234,7 @@ function MatrixSchematic({
             y={matY}
             width={r.length * dofCol}
             height={squareH}
-            fill={COLOR_HIGHLIGHT}
+            fill={activeFill}
           />
         ))}
 
@@ -232,7 +255,7 @@ function MatrixSchematic({
             y={matY + r.start * dofRow}
             width={vecW}
             height={r.length * dofRow}
-            fill={COLOR_HIGHLIGHT}
+            fill={activeFill}
           />
         ))}
         <text
@@ -256,10 +279,10 @@ function MatrixSchematic({
         <dd>{(stats.assemble.hits + stats.assemble.misses).toLocaleString()}</dd>
         <dt>Unknown DOFs</dt>
         <dd>{stats.unknownDofs}</dd>
-        {highlightedDofs.size > 0 && (
+        {activeDofs.size > 0 && (
           <>
-            <dt>Highlighted DOFs</dt>
-            <dd>{highlightedDofs.size}</dd>
+            <dt>{showHover ? "Hover DOFs" : "Selection DOFs"}</dt>
+            <dd>{activeDofs.size}</dd>
           </>
         )}
       </dl>
