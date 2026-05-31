@@ -55,10 +55,14 @@ interface InfoPanelProps {
    *  the line-selection yellow with orange, so the user sees the
    *  drilled-down element scope only while hovering. */
   readonly matrixHoveredDofs: ReadonlySet<number>;
-  /** Reverse direction: matrix-view fires this with the DOF row index
-   *  it's currently hovering, so the canvas can light up the
-   *  corresponding mesh node + containing elements. null = no hover. */
-  readonly onHoverMatrixDof: (dof: number | null) => void;
+  /** Reverse direction: matrix-view fires this with the row DOF (cursor
+   *  Y) and col DOF (cursor X, only when over H or G — null over u, t
+   *  or the equals sign). Null on either side = no hover for that
+   *  side. Drives the canvas overlay's row/col node rings. */
+  readonly onHoverMatrixDof: (
+    row: number | null,
+    col: number | null,
+  ) => void;
 }
 
 export function InfoPanel({

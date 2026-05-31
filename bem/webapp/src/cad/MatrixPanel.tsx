@@ -32,12 +32,17 @@ interface MatrixViewProps {
    *  When non-empty, REPLACES the yellow line highlight with orange
    *  so the user sees just the element's scope while hovering. */
   readonly hoveredDofs: ReadonlySet<number>;
-  /** Called when the user hovers the schematic with a specific DOF
-   *  row index (0 .. 2·nodeCount−1), or null when the cursor leaves
-   *  the matrix rows entirely. Used to drive the reverse-direction
-   *  highlight on the main canvas (yellow ring on the corresponding
-   *  node + glow on the elements containing it). */
-  readonly onHoverMatrixDof: (dof: number | null) => void;
+  /** Called when the user hovers the schematic. `row` is the DOF
+   *  index under the cursor's vertical position (shared across H, u,
+   *  G, t — they're the same equation row). `col` is the DOF index
+   *  under the cursor's horizontal position only when the cursor is
+   *  inside H or G — null when over u, t, the = sign, or outside.
+   *  Drives the reverse-direction canvas highlight (one node ring
+   *  for the row, another for the col when distinct). */
+  readonly onHoverMatrixDof: (
+    row: number | null,
+    col: number | null,
+  ) => void;
 }
 
 export function MatrixView({
@@ -74,7 +79,10 @@ function MatrixSchematic({
   readonly stats: SolveStats;
   readonly highlightedDofs: ReadonlySet<number>;
   readonly hoveredDofs: ReadonlySet<number>;
-  readonly onHoverMatrixDof: (dof: number | null) => void;
+  readonly onHoverMatrixDof: (
+    row: number | null,
+    col: number | null,
+  ) => void;
 }) {
   const N = stats.assemble.nodeCount;
   const size = 2 * N; // matrix side length in DOFs
@@ -114,7 +122,16 @@ function MatrixSchematic({
   const COLOR_MATRIX_HOVER_FILL = "rgba(250, 204, 21, 0.95)";
   const COLOR_MATRIX_HOVER_STROKE = "rgba(120, 90, 0, 0.7)";
   const STROKE = "rgb(0, 0, 0)";
-  const [matrixHover, setMatrixHover] = useState<number | null>(null);
+  // Local hover tracking:
+  //   row     = DOF index from cursor Y (shared by H, u, G, t)
+  //   col     = DOF index from cursor X within H or G's rect (null
+  //             when over u, t, the equals sign, or outside)
+  //   colSide = which matrix the column highlight belongs on
+  const [matrixHover, setMatrixHover] = useState<{
+    row: number | null;
+    col: number | null;
+    colSide: "H" | "G" | null;
+  }>({ row: null, col: null, colSide: null });
 
   // When the user is hovering a specific mesh element, its 6 DOFs
   // REPLACE the line-selection yellow with orange. That way the user
@@ -142,30 +159,59 @@ function MatrixSchematic({
         aria-label={`Hu = Gt — H and G are ${size}×${size}, u and t are ${size}×1`}
         shapeRendering="crispEdges"
         onMouseMove={(e) => {
-          // Translate cursor → DOF row via the SVG bounding rect's
-          // vertical fraction inside the matrix band (matY..matY+squareH).
-          // Cursor anywhere outside the band (above the rectangles, or
-          // below them in the u/t label strip) clears the hover.
+          // SVG viewBox coords from screen px via bounding rect.
           const rect = e.currentTarget.getBoundingClientRect();
-          if (rect.height === 0) return;
-          const yFrac = (e.clientY - rect.top) / rect.height;
-          const yInVB = yFrac * VBH;
-          if (yInVB < matY || yInVB > matY + squareH) {
-            if (matrixHover !== null) setMatrixHover(null);
-            onHoverMatrixDof(null);
-            return;
+          if (rect.width === 0 || rect.height === 0) return;
+          const xInVB = ((e.clientX - rect.left) / rect.width) * VBW;
+          const yInVB = ((e.clientY - rect.top) / rect.height) * VBH;
+          const inBand = yInVB >= matY && yInVB <= matY + squareH;
+          const row = inBand
+            ? Math.max(
+                0,
+                Math.min(size - 1, Math.floor(((yInVB - matY) / squareH) * size)),
+              )
+            : null;
+          // Column applies only when the cursor is inside H or G.
+          let col: number | null = null;
+          let colSide: "H" | "G" | null = null;
+          if (inBand) {
+            if (xInVB >= hX && xInVB <= hX + squareW) {
+              col = Math.max(
+                0,
+                Math.min(
+                  size - 1,
+                  Math.floor(((xInVB - hX) / squareW) * size),
+                ),
+              );
+              colSide = "H";
+            } else if (xInVB >= gX && xInVB <= gX + squareW) {
+              col = Math.max(
+                0,
+                Math.min(
+                  size - 1,
+                  Math.floor(((xInVB - gX) / squareW) * size),
+                ),
+              );
+              colSide = "G";
+            }
           }
-          const rowFrac = (yInVB - matY) / squareH;
-          const dof = Math.max(
-            0,
-            Math.min(size - 1, Math.floor(rowFrac * size)),
-          );
-          if (matrixHover !== dof) setMatrixHover(dof);
-          onHoverMatrixDof(dof);
+          if (
+            matrixHover.row !== row ||
+            matrixHover.col !== col ||
+            matrixHover.colSide !== colSide
+          ) {
+            setMatrixHover({ row, col, colSide });
+          }
+          onHoverMatrixDof(row, col);
         }}
         onMouseLeave={() => {
-          if (matrixHover !== null) setMatrixHover(null);
-          onHoverMatrixDof(null);
+          if (
+            matrixHover.row !== null ||
+            matrixHover.col !== null
+          ) {
+            setMatrixHover({ row: null, col: null, colSide: null });
+          }
+          onHoverMatrixDof(null, null);
         }}
       >
         {/* H — orange square */}
@@ -311,49 +357,93 @@ function MatrixSchematic({
           t
         </text>
 
-        {/* Matrix-on-matrix hover: single-row and single-col stripe
-            at the DOF directly under the cursor. Drawn last so it
-            overlays the broader selection + element-hover stripes. */}
-        {matrixHover !== null && (() => {
-          const y = matY + matrixHover * dofRow;
-          const xH = hX + matrixHover * dofCol;
-          const xG = gX + matrixHover * dofCol;
+        {/* Matrix-on-matrix hover. Row follows cursor Y (shared across
+            all four — they're the same equation row). Column follows
+            cursor X only inside H or G — vectors have no columns.
+            Drawn last so it overlays the broader selection / element
+            stripes underneath. */}
+        {(matrixHover.row !== null || matrixHover.col !== null) && (() => {
           const fill = COLOR_MATRIX_HOVER_FILL;
           const stroke = COLOR_MATRIX_HOVER_STROKE;
+          const y =
+            matrixHover.row !== null
+              ? matY + matrixHover.row * dofRow
+              : 0;
+          const colX =
+            matrixHover.col !== null
+              ? (matrixHover.colSide === "H" ? hX : gX) +
+                matrixHover.col * dofCol
+              : 0;
           return (
             <g pointerEvents="none">
-              {/* H row */}
-              <rect x={hX} y={y} width={squareW} height={dofRow} fill={fill} />
-              {/* H column */}
-              <rect x={xH} y={matY} width={dofCol} height={squareH} fill={fill} />
-              {/* u row */}
-              <rect x={uX} y={y} width={vecW} height={dofRow} fill={fill} />
-              {/* G row */}
-              <rect x={gX} y={y} width={squareW} height={dofRow} fill={fill} />
-              {/* G column */}
-              <rect x={xG} y={matY} width={dofCol} height={squareH} fill={fill} />
-              {/* t row */}
-              <rect x={tX} y={y} width={vecW} height={dofRow} fill={fill} />
-              {/* Thin outline on the H row for legibility against the
-                  busy selection/hover backdrop. */}
-              <rect
-                x={hX}
-                y={y}
-                width={squareW}
-                height={dofRow}
-                fill="none"
-                stroke={stroke}
-                strokeWidth={0.4}
-              />
-              <rect
-                x={gX}
-                y={y}
-                width={squareW}
-                height={dofRow}
-                fill="none"
-                stroke={stroke}
-                strokeWidth={0.4}
-              />
+              {matrixHover.row !== null && (
+                <>
+                  <rect x={hX} y={y} width={squareW} height={dofRow} fill={fill} />
+                  <rect x={uX} y={y} width={vecW} height={dofRow} fill={fill} />
+                  <rect x={gX} y={y} width={squareW} height={dofRow} fill={fill} />
+                  <rect x={tX} y={y} width={vecW} height={dofRow} fill={fill} />
+                  {/* Outline on H, G rows so the thin stripe reads
+                      against the selection/element backdrop. */}
+                  <rect
+                    x={hX}
+                    y={y}
+                    width={squareW}
+                    height={dofRow}
+                    fill="none"
+                    stroke={stroke}
+                    strokeWidth={0.4}
+                  />
+                  <rect
+                    x={gX}
+                    y={y}
+                    width={squareW}
+                    height={dofRow}
+                    fill="none"
+                    stroke={stroke}
+                    strokeWidth={0.4}
+                  />
+                </>
+              )}
+              {matrixHover.col !== null && matrixHover.colSide === "H" && (
+                <>
+                  <rect
+                    x={colX}
+                    y={matY}
+                    width={dofCol}
+                    height={squareH}
+                    fill={fill}
+                  />
+                  <rect
+                    x={colX}
+                    y={matY}
+                    width={dofCol}
+                    height={squareH}
+                    fill="none"
+                    stroke={stroke}
+                    strokeWidth={0.4}
+                  />
+                </>
+              )}
+              {matrixHover.col !== null && matrixHover.colSide === "G" && (
+                <>
+                  <rect
+                    x={colX}
+                    y={matY}
+                    width={dofCol}
+                    height={squareH}
+                    fill={fill}
+                  />
+                  <rect
+                    x={colX}
+                    y={matY}
+                    width={dofCol}
+                    height={squareH}
+                    fill="none"
+                    stroke={stroke}
+                    strokeWidth={0.4}
+                  />
+                </>
+              )}
             </g>
           );
         })()}

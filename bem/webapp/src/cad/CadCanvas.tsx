@@ -303,18 +303,31 @@ export function CadCanvas() {
     null,
   );
   const hoveredElementKeyRef = useRef<string | null>(null);
-  // Reverse direction — matrix-view hover. When the user moves the
-  // cursor over a row of the schematic, we light up the corresponding
-  // mesh node + its containing elements on the canvas in yellow.
-  const [hoveredMatrixDof, setHoveredMatrixDof] = useState<number | null>(
+  // Reverse direction — matrix-view hover. The matrix view reports
+  // both a row DOF (cursor Y) and a col DOF (cursor X, only when over
+  // H or G). We translate both into canvas highlights — one node ring
+  // for the row, another for the col when the two differ.
+  const [hoveredMatrixRow, setHoveredMatrixRow] = useState<number | null>(
     null,
   );
-  const hoveredMatrixDofRef = useRef<number | null>(null);
-  const onHoverMatrixDof = useCallback((dof: number | null) => {
-    if (dof === hoveredMatrixDofRef.current) return;
-    hoveredMatrixDofRef.current = dof;
-    setHoveredMatrixDof(dof);
-  }, []);
+  const [hoveredMatrixCol, setHoveredMatrixCol] = useState<number | null>(
+    null,
+  );
+  const hoveredMatrixRowRef = useRef<number | null>(null);
+  const hoveredMatrixColRef = useRef<number | null>(null);
+  const onHoverMatrixDof = useCallback(
+    (row: number | null, col: number | null) => {
+      if (row !== hoveredMatrixRowRef.current) {
+        hoveredMatrixRowRef.current = row;
+        setHoveredMatrixRow(row);
+      }
+      if (col !== hoveredMatrixColRef.current) {
+        hoveredMatrixColRef.current = col;
+        setHoveredMatrixCol(col);
+      }
+    },
+    [],
+  );
   const [lhsWidth, setLhsWidth] = useState(320);
   const [rhsWidth, setRhsWidth] = useState(260);
 
@@ -488,25 +501,41 @@ export function CadCanvas() {
     return solveStats.dofsByElement.get(hoveredElementKey) ?? new Set();
   }, [hoveredElementKey, solveStats]);
 
-  // Reverse hover: from the matrix-view DOF index, look up the
-  // corresponding global node (= DOF / 2) and the element keys that
-  // contain it. The canvas overlay draws a yellow ring at the node
-  // position and a yellow stroke on those elements.
-  const reverseHover = useMemo<{
+  // Reverse hover from the matrix view — translates a DOF index to
+  // its global node position + the set of elements that contain that
+  // node. Computed for both the row DOF (cursor Y) and the col DOF
+  // (cursor X on H or G). The canvas overlay below draws each as a
+  // separate ring + element-stroke group so the user can read the
+  // matrix entry as "this row's node connects to this col's node
+  // via the Kelvin kernel".
+  type ReverseHover = {
     nodePos: Vec2 | null;
     elementKeys: ReadonlySet<string>;
     axis: 0 | 1 | null;
-  }>(() => {
-    if (!solveStats || hoveredMatrixDof === null) {
-      return { nodePos: null, elementKeys: new Set(), axis: null };
-    }
-    const dof = hoveredMatrixDof;
+  };
+  const emptyReverseHover: ReverseHover = {
+    nodePos: null,
+    elementKeys: new Set(),
+    axis: null,
+  };
+  const lookupReverseHover = (dof: number | null): ReverseHover => {
+    if (!solveStats || dof === null) return emptyReverseHover;
     const nodeIdx = Math.floor(dof / 2);
     const axis = (dof & 1) as 0 | 1;
     const pos = solveStats.nodePositions[nodeIdx] ?? null;
     const els = solveStats.elementsByNodeIndex.get(nodeIdx) ?? new Set();
     return { nodePos: pos, elementKeys: els, axis };
-  }, [hoveredMatrixDof, solveStats]);
+  };
+  const reverseHoverRow = useMemo(
+    () => lookupReverseHover(hoveredMatrixRow),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [hoveredMatrixRow, solveStats],
+  );
+  const reverseHoverCol = useMemo(
+    () => lookupReverseHover(hoveredMatrixCol),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [hoveredMatrixCol, solveStats],
+  );
 
   /**
    * Auto-scale factor for the deformed-shape overlay. We multiply each node's
@@ -2797,65 +2826,97 @@ export function CadCanvas() {
                 />
               )}
 
-              {/* Matrix → canvas reverse hover. Highlights the mesh
-                  node whose DOF row is currently under the cursor in
-                  the matrix view, plus the elements containing it. */}
-              {reverseHover.nodePos && (
+              {/* Matrix → canvas reverse hover. Up to two highlights:
+                  the row DOF's node (from cursor Y in the matrix) and
+                  the col DOF's node (from cursor X on H or G). Same
+                  node → only one is drawn. */}
+              {(reverseHoverRow.nodePos || reverseHoverCol.nodePos) && (
                 <g pointerEvents="none">
-                  {/* Element chord highlights (yellow stroke on each
-                      containing element's chord). */}
-                  {meshElements
-                    .filter((el) =>
-                      reverseHover.elementKeys.has(
-                        `${el.lineId}|${el.indexInLine}`,
-                      ),
-                    )
-                    .map((el) => (
-                      <line
-                        key={`mxh-${el.lineId}-${el.indexInLine}`}
-                        x1={el.anchors[0].x}
-                        y1={el.anchors[0].y}
-                        x2={el.anchors[2].x}
-                        y2={el.anchors[2].y}
-                        stroke="rgb(252, 211, 77)"
-                        strokeWidth={view.width * 0.005}
-                        strokeLinecap="round"
-                        opacity={0.85}
-                      />
-                    ))}
-                  {/* Yellow ring at the node itself. */}
-                  <circle
-                    cx={reverseHover.nodePos.x}
-                    cy={reverseHover.nodePos.y}
-                    r={view.width * 0.014}
-                    fill="rgba(252, 211, 77, 0.45)"
-                    stroke="rgb(245, 158, 11)"
-                    strokeWidth={view.width * 0.0022}
-                  />
-                  {/* Axis tick — small line indicating ux/uy (axis 0
-                      = horizontal, axis 1 = vertical) to identify
-                      which scalar DOF the matrix row corresponds to. */}
-                  {reverseHover.axis === 0 ? (
-                    <line
-                      x1={reverseHover.nodePos.x - view.width * 0.014}
-                      y1={reverseHover.nodePos.y}
-                      x2={reverseHover.nodePos.x + view.width * 0.014}
-                      y2={reverseHover.nodePos.y}
-                      stroke="rgb(245, 158, 11)"
-                      strokeWidth={view.width * 0.003}
-                      strokeLinecap="round"
-                    />
-                  ) : (
-                    <line
-                      x1={reverseHover.nodePos.x}
-                      y1={reverseHover.nodePos.y - view.width * 0.014}
-                      x2={reverseHover.nodePos.x}
-                      y2={reverseHover.nodePos.y + view.width * 0.014}
-                      stroke="rgb(245, 158, 11)"
-                      strokeWidth={view.width * 0.003}
-                      strokeLinecap="round"
-                    />
-                  )}
+                  {(() => {
+                    const groups: {
+                      tag: string;
+                      hover: typeof reverseHoverRow;
+                      tone: "row" | "col";
+                    }[] = [];
+                    if (reverseHoverRow.nodePos) {
+                      groups.push({ tag: "row", hover: reverseHoverRow, tone: "row" });
+                    }
+                    if (
+                      reverseHoverCol.nodePos &&
+                      // Don't duplicate when row and col map to the same node.
+                      reverseHoverCol.nodePos !== reverseHoverRow.nodePos
+                    ) {
+                      groups.push({ tag: "col", hover: reverseHoverCol, tone: "col" });
+                    }
+                    return groups.flatMap(({ tag, hover, tone }) => {
+                      const ringFill =
+                        tone === "row"
+                          ? "rgba(252, 211, 77, 0.45)"
+                          : "rgba(132, 204, 22, 0.45)"; // lime for col
+                      const ringStroke =
+                        tone === "row" ? "rgb(245, 158, 11)" : "rgb(101, 163, 13)";
+                      const tickStroke = ringStroke;
+                      const elemStroke =
+                        tone === "row" ? "rgb(252, 211, 77)" : "rgb(132, 204, 22)";
+                      return [
+                        // Element chord highlights for elements containing
+                        // this node.
+                        ...meshElements
+                          .filter((el) =>
+                            hover.elementKeys.has(
+                              `${el.lineId}|${el.indexInLine}`,
+                            ),
+                          )
+                          .map((el) => (
+                            <line
+                              key={`mxh-${tag}-${el.lineId}-${el.indexInLine}`}
+                              x1={el.anchors[0].x}
+                              y1={el.anchors[0].y}
+                              x2={el.anchors[2].x}
+                              y2={el.anchors[2].y}
+                              stroke={elemStroke}
+                              strokeWidth={view.width * 0.005}
+                              strokeLinecap="round"
+                              opacity={0.85}
+                            />
+                          )),
+                        // Ring at the node.
+                        <circle
+                          key={`mxh-${tag}-ring`}
+                          cx={hover.nodePos!.x}
+                          cy={hover.nodePos!.y}
+                          r={view.width * 0.014}
+                          fill={ringFill}
+                          stroke={ringStroke}
+                          strokeWidth={view.width * 0.0022}
+                        />,
+                        // Axis tick (horizontal = ux/tx, vertical = uy/ty).
+                        hover.axis === 0 ? (
+                          <line
+                            key={`mxh-${tag}-tick`}
+                            x1={hover.nodePos!.x - view.width * 0.014}
+                            y1={hover.nodePos!.y}
+                            x2={hover.nodePos!.x + view.width * 0.014}
+                            y2={hover.nodePos!.y}
+                            stroke={tickStroke}
+                            strokeWidth={view.width * 0.003}
+                            strokeLinecap="round"
+                          />
+                        ) : (
+                          <line
+                            key={`mxh-${tag}-tick`}
+                            x1={hover.nodePos!.x}
+                            y1={hover.nodePos!.y - view.width * 0.014}
+                            x2={hover.nodePos!.x}
+                            y2={hover.nodePos!.y + view.width * 0.014}
+                            stroke={tickStroke}
+                            strokeWidth={view.width * 0.003}
+                            strokeLinecap="round"
+                          />
+                        ),
+                      ];
+                    });
+                  })()}
                 </g>
               )}
             </g>
