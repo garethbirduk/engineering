@@ -275,6 +275,114 @@ describe("discretiseLines", () => {
     expect(Number.isNaN(n.uy)).toBe(true);
   });
 
+  it("boundary segments drive mesh order — outer square walked CCW emits a contiguous element sequence", () => {
+    // Four sides of a unit square as separate lines, declared in NON-CCW
+    // JSON order (left, top, right, bottom). The boundary lists them in
+    // CCW traversal order (left → bottom → right → top). With the
+    // boundary-driven ordering, the mesh array's elements must walk the
+    // boundary continuously (each element's end ≈ next element's start),
+    // even though model.lines is in a different order.
+    const model = {
+      points: [
+        { id: "BL", x: 0, y: 0 },
+        { id: "BR", x: 1, y: 0 },
+        { id: "TR", x: 1, y: 1 },
+        { id: "TL", x: 0, y: 1 },
+      ],
+      lines: [
+        { id: "left", startId: "TL", endId: "BL" },
+        { id: "top", startId: "TR", endId: "TL" },
+        { id: "right", startId: "BR", endId: "TR" },
+        { id: "bottom", startId: "BL", endId: "BR" },
+      ],
+      boundaries: [
+        {
+          id: "outer",
+          name: "outer",
+          segments: [
+            { lineId: "left", direction: 1 as const },
+            { lineId: "bottom", direction: 1 as const },
+            { lineId: "right", direction: 1 as const },
+            { lineId: "top", direction: 1 as const },
+          ],
+        },
+      ],
+    };
+    const els = discretiseLines(model, { elementsPerLine: 1 });
+    // 4 lines × 1 element = 4 elements in CCW boundary order.
+    expect(els.map((e) => e.lineId)).toEqual([
+      "left",
+      "bottom",
+      "right",
+      "top",
+    ]);
+    // The walk is continuous: each element's geometric end is the next
+    // element's geometric start (up to floating-point), closing the loop.
+    for (let i = 0; i < els.length; i++) {
+      const cur = els[i]!;
+      const next = els[(i + 1) % els.length]!;
+      expect(cur.end.x).toBeCloseTo(next.start.x);
+      expect(cur.end.y).toBeCloseTo(next.start.y);
+    }
+  });
+
+  it("boundary segment direction = -1 reverses element order and tags traverseReversed", () => {
+    // Three elements on a line. Boundary walks it backwards. The mesh
+    // array must emit elements [2, 1, 0] in that order, each tagged so
+    // the assembler walks node indices [2,1,0] for fresh-index
+    // assignment (giving the boundary-walk-first node the smallest
+    // global index).
+    const model = {
+      points: [
+        { id: "p1", x: 0, y: 0 },
+        { id: "p2", x: 3, y: 0 },
+      ],
+      lines: [{ id: "l1", startId: "p1", endId: "p2" }],
+      boundaries: [
+        {
+          id: "bnd",
+          name: "bnd",
+          segments: [{ lineId: "l1", direction: -1 as const }],
+        },
+      ],
+    };
+    const els = discretiseLines(model, { elementsPerLine: 3 });
+    // Mesh ARRAY order is reversed (boundary-walk order).
+    expect(els.map((e) => e.indexInLine)).toEqual([2, 1, 0]);
+    expect(els.every((e) => e.traverseReversed === true)).toBe(true);
+    // But each element's own data (anchors, nodes, localNodes) is
+    // unchanged — anchors[0] still sits at the smaller-t (native) end.
+    // First emitted element is indexInLine=2 → t ∈ [2/3, 1].
+    expect(els[0]!.tStart).toBeCloseTo(2 / 3);
+    expect(els[0]!.tEnd).toBeCloseTo(1);
+  });
+
+  it("lines without any boundary segment fall through in JSON order at the end", () => {
+    // Mixed: l1 is in a boundary, l2 isn't. l2 should still be
+    // discretised — it just appears after the boundary-driven elements.
+    const model = {
+      points: [
+        { id: "p1", x: 0, y: 0 },
+        { id: "p2", x: 1, y: 0 },
+        { id: "p3", x: 2, y: 0 },
+        { id: "p4", x: 3, y: 0 },
+      ],
+      lines: [
+        { id: "l1", startId: "p1", endId: "p2" },
+        { id: "l2", startId: "p3", endId: "p4" },
+      ],
+      boundaries: [
+        {
+          id: "bnd",
+          name: "bnd",
+          segments: [{ lineId: "l1", direction: 1 as const }],
+        },
+      ],
+    };
+    const els = discretiseLines(model, { elementsPerLine: 1 });
+    expect(els.map((e) => e.lineId)).toEqual(["l1", "l2"]);
+  });
+
   it("arc with continuous nodes: all 3 nodes per element are exactly on the arc", () => {
     // When the output nodes coincide with the geometry anchors (η = -1, 0, +1),
     // shape-function interpolation reproduces them exactly — all nodes on arc.
