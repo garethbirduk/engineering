@@ -18,7 +18,11 @@
 
 import { Matrix, solve as solveLinear } from "ml-matrix";
 import type { MeshElement, MeshNode } from "../elements/discretise.js";
-import { assembleHG, type BlockCache } from "./assemble.js";
+import {
+  assembleHG,
+  type AssembleStats,
+  type BlockCache,
+} from "./assemble.js";
 import {
   DEFAULT_MATERIAL,
   shearModulus,
@@ -26,6 +30,14 @@ import {
 } from "./kernels.js";
 
 export { DEFAULT_MATERIAL, type MaterialProperties };
+
+/** Work-done summary for a single solve. `assemble` mirrors
+ *  AssembleStats; `unknownDofs` is the size of the linear system the
+ *  LU solver actually saw (rough proxy for LU cost ≈ N³/3). */
+export interface SolveStats {
+  readonly assemble: AssembleStats;
+  readonly unknownDofs: number;
+}
 
 /**
  * Resolve every NaN DOF on the mesh into a number, returning a NEW mesh
@@ -42,8 +54,17 @@ export function solve(
   mesh: readonly MeshElement[],
   material: MaterialProperties = DEFAULT_MATERIAL,
   cache?: BlockCache,
+  statsOut?: { value?: SolveStats },
 ): MeshElement[] {
-  if (mesh.length === 0) return [];
+  if (mesh.length === 0) {
+    if (statsOut) {
+      statsOut.value = {
+        assemble: { hits: 0, misses: 0, gaussEvals: 0 },
+        unknownDofs: 0,
+      };
+    }
+    return [];
+  }
 
   const sys = assembleHG(mesh, material, cache);
   const N = sys.nodesByIndex.length;
@@ -106,7 +127,27 @@ export function solve(
   } catch {
     // Singular / unsolvable — return the input mesh untouched so the
     // viz layer just shows no displacement overlay.
+    if (statsOut) {
+      statsOut.value = { assemble: sys.stats, unknownDofs: 0 };
+    }
     return mesh.map((el) => ({ ...el }));
+  }
+
+  // Count the unknown DOFs that actually drove the LU — roughly N for
+  // the linear system size, but only the columns with a known/unknown
+  // pair contribute (degenerate DOFs get skipped). Useful for showing
+  // LU cost ≈ unknownDofs³/3 separately from the assemble stats.
+  let unknownDofs = 0;
+  for (let i = 0; i < N; i++) {
+    const node = sys.nodesByIndex[i]!;
+    for (let alpha = 0; alpha < 2; alpha++) {
+      const u = alpha === 0 ? node.ux : node.uy;
+      const t = alpha === 0 ? node.tx : node.ty;
+      if (!Number.isNaN(u) !== !Number.isNaN(t)) unknownDofs++;
+    }
+  }
+  if (statsOut) {
+    statsOut.value = { assemble: sys.stats, unknownDofs };
   }
 
   // Backfill per-node solved DOFs into a flat array indexed by global node.

@@ -43,6 +43,7 @@ import {
   type BlockCache,
   type MaterialProperties,
   type MeshElement,
+  type SolveStats,
   type StressTriple,
   type Vec2,
 } from "@bem/engine";
@@ -358,11 +359,29 @@ export function CadCanvas() {
   // Solve. Memoised — runs on every mesh / material change. With the
   // cache passed through, only the pair-blocks touching modified
   // elements get re-integrated; everything else reuses its cached
-  // contribution.
-  const solvedMesh = useMemo(
-    () => solve(meshElements, material, blockCacheRef.current),
-    [meshElements, material],
-  );
+  // contribution. The solveStatsRef captures hit/miss/Gauss-eval
+  // counts side-channel; we promote it to React state for the toolbar
+  // via an effect below.
+  const solveStatsRef = useRef<{ value?: SolveStats }>({});
+  const solvedMesh = useMemo(() => {
+    solveStatsRef.current = {};
+    return solve(
+      meshElements,
+      material,
+      blockCacheRef.current,
+      solveStatsRef.current,
+    );
+  }, [meshElements, material]);
+
+  // Promote the solver's latest stats into React state so the toolbar
+  // re-renders with the new counts. useState + effect keeps the
+  // toolbar reactive without coupling the BEM solve to React internals.
+  const [solveStats, setSolveStats] = useState<SolveStats | null>(null);
+  useEffect(() => {
+    if (solveStatsRef.current.value) {
+      setSolveStats(solveStatsRef.current.value);
+    }
+  }, [solvedMesh]);
 
   /**
    * Auto-scale factor for the deformed-shape overlay. We multiply each node's
@@ -1764,6 +1783,7 @@ export function CadCanvas() {
         internalNodesVisible={internalNodesVisible}
         canShowInternalNodes={canShowInternalNodes}
         selectionSummary={selectionSummary}
+        solveStats={solveStats}
         onCreateDomain={() => dispatch({ type: "createDomainFromSelection" })}
         onDelete={() => dispatch({ type: "deleteSelection" })}
         onToggleMesh={() => dispatch({ type: "toggleMesh" })}

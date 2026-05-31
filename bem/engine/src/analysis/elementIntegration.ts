@@ -67,6 +67,14 @@ export interface ElementBlocks {
   readonly H: Block2x6;
 }
 
+/** Mutable counter the integrator increments to track work done. The
+ *  total at the end of an assemble run is the literal number of Gauss-
+ *  point evaluations the adaptive loop performed across every pair
+ *  that missed the cache. Cache hits don't touch this object. */
+export interface IntegrationStats {
+  gaussEvals: number;
+}
+
 /** Build an empty 2×6 zero block. */
 function zeros2x6(): Block2x6 {
   return [
@@ -86,6 +94,7 @@ export function integrateOverElement(
   element: MeshElement,
   material: MaterialProperties,
   singularNodeIdx: 0 | 1 | 2 | null,
+  stats?: IntegrationStats,
 ): ElementBlocks {
   const nu = effectiveNu(material);
   const G = shearModulus(material);
@@ -100,6 +109,7 @@ export function integrateOverElement(
       REGULAR_N_MIN,
       REGULAR_N_STEP,
       REGULAR_N_MAX,
+      stats,
     );
   }
 
@@ -115,6 +125,7 @@ export function integrateOverElement(
     SINGULAR_N_MIN,
     SINGULAR_N_STEP,
     SINGULAR_N_MAX,
+    stats,
   );
 }
 
@@ -128,18 +139,17 @@ function adaptiveIntegrate(
   nMin: number,
   nStep: number,
   nMax: number,
+  stats: IntegrationStats | undefined,
 ): ElementBlocks {
   let prev: ElementBlocks | null = null;
-  let curr: ElementBlocks = integrateWithRule(
-    s,
-    element,
-    G,
-    nu,
-    buildRule(nMin),
-  );
+  const firstRule = buildRule(nMin);
+  let curr: ElementBlocks = integrateWithRule(s, element, G, nu, firstRule);
+  if (stats) stats.gaussEvals += firstRule.nodes.length;
   for (let n = nMin + nStep; n <= nMax; n += nStep) {
     prev = curr;
-    curr = integrateWithRule(s, element, G, nu, buildRule(n));
+    const nextRule = buildRule(n);
+    curr = integrateWithRule(s, element, G, nu, nextRule);
+    if (stats) stats.gaussEvals += nextRule.nodes.length;
     if (blocksConverged(prev, curr, CONVERGENCE_TOL)) return curr;
   }
   return curr;

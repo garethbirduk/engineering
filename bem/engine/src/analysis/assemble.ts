@@ -19,6 +19,7 @@ import type { MeshElement, MeshNode } from "../elements/discretise.js";
 import {
   integrateOverElement,
   type ElementBlocks,
+  type IntegrationStats,
 } from "./elementIntegration.js";
 import type { MaterialProperties } from "./kernels.js";
 
@@ -107,6 +108,23 @@ export interface AssembledSystem {
   readonly nodesByIndex: readonly MeshNode[];
   /** Per (element, local-node-index): which global node it maps to. */
   readonly elementNodeIndex: ReadonlyMap<MeshElement, readonly [number, number, number]>;
+  /** Work-done summary for this assemble call. */
+  readonly stats: AssembleStats;
+}
+
+/** Counters describing how much integration work assembleHG just did.
+ *  All values are exact, not estimates — they're literal counts of
+ *  loop iterations and cache lookups. Useful for showing reanalysis
+ *  savings ("X G-evals this solve vs Y if uncached"). */
+export interface AssembleStats {
+  /** (collocation, field-element) pairs that hit the cache. */
+  readonly hits: number;
+  /** (collocation, field-element) pairs that missed and ran integration. */
+  readonly misses: number;
+  /** Total Gauss-point evaluations done across every miss this call.
+   *  Dominant cost of the assemble step (each eval = one kernel + one
+   *  2×6 scatter contribution). 0 when everything hit the cache. */
+  readonly gaussEvals: number;
 }
 
 /** Position-based dedup key. Nodes within POS_EPS of each other share an index. */
@@ -259,6 +277,9 @@ export function assembleHG(
 
   const matKey = materialContentKey(material);
   const usedKeys = cache ? new Set<string>() : null;
+  const integStats: IntegrationStats = { gaussEvals: 0 };
+  let hits = 0;
+  let misses = 0;
 
   // For each collocation node i (global index ic), integrate over every
   // element j, accumulating into H and G at rows [2ic, 2ic+1] and
@@ -287,12 +308,27 @@ export function assembleHG(
         const hit = cache.get(key);
         if (hit) {
           blocks = hit;
+          hits++;
         } else {
-          blocks = integrateOverElement(s, el, material, singularLocalIdx);
+          blocks = integrateOverElement(
+            s,
+            el,
+            material,
+            singularLocalIdx,
+            integStats,
+          );
           cache.set(key, blocks);
+          misses++;
         }
       } else {
-        blocks = integrateOverElement(s, el, material, singularLocalIdx);
+        blocks = integrateOverElement(
+          s,
+          el,
+          material,
+          singularLocalIdx,
+          integStats,
+        );
+        misses++;
       }
 
       // Scatter the 2×6 block into the global matrices.
@@ -347,5 +383,6 @@ export function assembleHG(
     nodeIndexByKey: registry.nodeIndexByKey,
     nodesByIndex: registry.nodesByIndex,
     elementNodeIndex: registry.elementNodeIndex,
+    stats: { hits, misses, gaussEvals: integStats.gaussEvals },
   };
 }

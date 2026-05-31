@@ -2,7 +2,9 @@
 //
 // Left group  — selection-driven create/delete actions.
 // Right group — always-visible file actions (New / Save / Load).
-// Between    — selection summary.
+// Between    — selection summary + last-solve work-done counters.
+
+import type { SolveStats } from "@bem/engine";
 
 interface ToolbarProps {
   readonly canCreateDomain: boolean;
@@ -13,6 +15,7 @@ interface ToolbarProps {
   readonly internalNodesVisible: boolean;
   readonly canShowInternalNodes: boolean;
   readonly selectionSummary: string;
+  readonly solveStats: SolveStats | null;
   readonly onCreateDomain: () => void;
   readonly onDelete: () => void;
   readonly onToggleMesh: () => void;
@@ -21,6 +24,53 @@ interface ToolbarProps {
   readonly onSave: () => void;
   readonly onLoad: () => void;
   readonly onNew: () => void;
+}
+
+/** Compact number formatter — "1.2k", "47k", "2.3M". Keeps the
+ *  toolbar pill narrow for large element counts. */
+function fmtCount(n: number): string {
+  if (n < 1000) return n.toString();
+  if (n < 10_000) return (n / 1000).toFixed(1) + "k";
+  if (n < 1_000_000) return Math.round(n / 1000) + "k";
+  return (n / 1_000_000).toFixed(1) + "M";
+}
+
+function SolveStatsPill({ stats }: { stats: SolveStats }) {
+  const { hits, misses, gaussEvals } = stats.assemble;
+  const totalPairs = hits + misses;
+  // Reused fraction = hits / total — shows reanalysis savings directly.
+  // For a cold solve (cache empty) hits = 0 → 0% reuse → all work fresh.
+  // For a no-op re-solve hits = total → 100% reuse → ~0 G-evals.
+  const reusedPct =
+    totalPairs > 0 ? Math.round((100 * hits) / totalPairs) : 0;
+  // Estimate of what the assemble would have cost without the cache.
+  // Each pair averages (gaussEvals / misses) evals, so a cold equivalent
+  // is roughly totalPairs × that average. Used for the "saved" line in
+  // the tooltip — purely informational.
+  const evalsPerMiss = misses > 0 ? gaussEvals / misses : 0;
+  const coldEstimate = Math.round(totalPairs * evalsPerMiss);
+  const luCost = Math.round((stats.unknownDofs ** 3) / 3);
+  const tooltip =
+    `This solve:\n` +
+    `  ${fmtCount(gaussEvals)} Gauss-pt evals (assemble work actually done)\n` +
+    `  ${hits.toLocaleString()} / ${totalPairs.toLocaleString()} pair-blocks reused from cache (${reusedPct}%)\n` +
+    `  ${misses.toLocaleString()} pair-blocks re-integrated\n` +
+    (coldEstimate > gaussEvals
+      ? `\nWithout the cache this would have been ~${fmtCount(coldEstimate)} G-evals (${Math.round(100 * (1 - gaussEvals / coldEstimate))}% saved)\n`
+      : "") +
+    `\nLU on ${stats.unknownDofs} unknown DOFs ≈ ${fmtCount(luCost)} flops`;
+  return (
+    <div
+      className="cad-toolbar-stats"
+      title={tooltip}
+      aria-label={`Last solve: ${gaussEvals} Gauss-pt evaluations, ${reusedPct}% reused from cache`}
+    >
+      <span className="cad-toolbar-stats-num">{fmtCount(gaussEvals)}</span>
+      <span className="cad-toolbar-stats-unit">G-evals</span>
+      <span className="cad-toolbar-stats-sep">·</span>
+      <span className="cad-toolbar-stats-reuse">{reusedPct}% cached</span>
+    </div>
+  );
 }
 
 export function Toolbar({
@@ -32,6 +82,7 @@ export function Toolbar({
   internalNodesVisible,
   canShowInternalNodes,
   selectionSummary,
+  solveStats,
   onCreateDomain,
   onDelete,
   onToggleMesh,
@@ -66,6 +117,7 @@ export function Toolbar({
         </button>
       )}
       <div className="cad-toolbar-spacer" />
+      {solveStats && <SolveStatsPill stats={solveStats} />}
       <div className="cad-toolbar-status" aria-live="polite">
         {selectionSummary}
       </div>

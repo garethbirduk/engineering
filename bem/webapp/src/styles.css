@@ -150,6 +150,38 @@ body,
   white-space: nowrap;
 }
 
+.cad-toolbar-stats {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.3rem;
+  font-size: 0.75rem;
+  padding: 0.18rem 0.55rem;
+  border-radius: 0.3rem;
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  font-variant-numeric: tabular-nums;
+  cursor: help;
+  margin-right: 0.6rem;
+}
+
+.cad-toolbar-stats-num {
+  font-weight: 600;
+}
+
+.cad-toolbar-stats-unit {
+  opacity: 0.65;
+  font-size: 0.7rem;
+}
+
+.cad-toolbar-stats-sep {
+  opacity: 0.4;
+  margin: 0 0.05rem;
+}
+
+.cad-toolbar-stats-reuse {
+  opacity: 0.85;
+}
+
 .cad-toolgroup {
   display: inline-flex;
   gap: 0.25rem;
