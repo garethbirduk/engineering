@@ -20,6 +20,7 @@
 // diagram, just keyed on the SELECTED line's DOFs rather than the
 // CACHE-MISS DOFs.
 
+import { useState } from "react";
 import type { SolveStats } from "@bem/engine";
 
 interface MatrixViewProps {
@@ -107,7 +108,13 @@ function MatrixSchematic({
   const COLOR_T = "rgb(239, 68, 68)"; // red
   const COLOR_HIGHLIGHT = "rgba(255, 235, 59, 0.78)"; // semi-translucent yellow
   const COLOR_HOVER = "rgba(249, 115, 22, 0.85)"; // semi-translucent orange
+  // Matrix-on-matrix hover — the single row/col under the cursor.
+  // Slightly darker yellow with a 1px outline so it reads even when
+  // it overlays the broader selection-yellow stripes.
+  const COLOR_MATRIX_HOVER_FILL = "rgba(250, 204, 21, 0.95)";
+  const COLOR_MATRIX_HOVER_STROKE = "rgba(120, 90, 0, 0.7)";
   const STROKE = "rgb(0, 0, 0)";
+  const [matrixHover, setMatrixHover] = useState<number | null>(null);
 
   // When the user is hovering a specific mesh element, its 6 DOFs
   // REPLACE the line-selection yellow with orange. That way the user
@@ -144,6 +151,7 @@ function MatrixSchematic({
           const yFrac = (e.clientY - rect.top) / rect.height;
           const yInVB = yFrac * VBH;
           if (yInVB < matY || yInVB > matY + squareH) {
+            if (matrixHover !== null) setMatrixHover(null);
             onHoverMatrixDof(null);
             return;
           }
@@ -152,9 +160,13 @@ function MatrixSchematic({
             0,
             Math.min(size - 1, Math.floor(rowFrac * size)),
           );
+          if (matrixHover !== dof) setMatrixHover(dof);
           onHoverMatrixDof(dof);
         }}
-        onMouseLeave={() => onHoverMatrixDof(null)}
+        onMouseLeave={() => {
+          if (matrixHover !== null) setMatrixHover(null);
+          onHoverMatrixDof(null);
+        }}
       >
         {/* H — orange square */}
         <rect
@@ -298,6 +310,53 @@ function MatrixSchematic({
         >
           t
         </text>
+
+        {/* Matrix-on-matrix hover: single-row and single-col stripe
+            at the DOF directly under the cursor. Drawn last so it
+            overlays the broader selection + element-hover stripes. */}
+        {matrixHover !== null && (() => {
+          const y = matY + matrixHover * dofRow;
+          const xH = hX + matrixHover * dofCol;
+          const xG = gX + matrixHover * dofCol;
+          const fill = COLOR_MATRIX_HOVER_FILL;
+          const stroke = COLOR_MATRIX_HOVER_STROKE;
+          return (
+            <g pointerEvents="none">
+              {/* H row */}
+              <rect x={hX} y={y} width={squareW} height={dofRow} fill={fill} />
+              {/* H column */}
+              <rect x={xH} y={matY} width={dofCol} height={squareH} fill={fill} />
+              {/* u row */}
+              <rect x={uX} y={y} width={vecW} height={dofRow} fill={fill} />
+              {/* G row */}
+              <rect x={gX} y={y} width={squareW} height={dofRow} fill={fill} />
+              {/* G column */}
+              <rect x={xG} y={matY} width={dofCol} height={squareH} fill={fill} />
+              {/* t row */}
+              <rect x={tX} y={y} width={vecW} height={dofRow} fill={fill} />
+              {/* Thin outline on the H row for legibility against the
+                  busy selection/hover backdrop. */}
+              <rect
+                x={hX}
+                y={y}
+                width={squareW}
+                height={dofRow}
+                fill="none"
+                stroke={stroke}
+                strokeWidth={0.4}
+              />
+              <rect
+                x={gX}
+                y={y}
+                width={squareW}
+                height={dofRow}
+                fill="none"
+                stroke={stroke}
+                strokeWidth={0.4}
+              />
+            </g>
+          );
+        })()}
       </svg>
       <dl className="matrix-schematic-meta">
         <dt>Mesh nodes</dt>
