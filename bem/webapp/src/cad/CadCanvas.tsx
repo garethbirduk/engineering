@@ -66,6 +66,12 @@ import {
   loadFromLocalStorage,
   saveToLocalStorage,
 } from "./persistence.js";
+// Bundled default example — loaded on first visit (no localStorage yet)
+// so the deployed page opens with something interesting instead of an
+// empty canvas. ?raw gives us the file contents as a string so we can
+// reuse the existing `deserialize` parser.
+import defaultExampleText from "../examples/plate-with-hole.json?raw";
+import { deserialize } from "@bem/engine";
 import {
   INITIAL_STATE,
   canvasReducer,
@@ -1587,11 +1593,24 @@ export function CadCanvas() {
 
   // ── persistence (localStorage auto-save / restore) ─────────────────────
 
-  // Restore once at mount. If a stored model exists, load it.
+  // Restore once at mount. If a stored model exists, load it; otherwise
+  // (first visit / cleared cache / fresh deploy) load the bundled
+  // plate-with-hole example so the page opens with something the user
+  // can immediately interact with.
   useEffect(() => {
     const stored = loadFromLocalStorage();
     if (stored) {
       dispatch({ type: "loadModel", model: stored });
+      return;
+    }
+    try {
+      const example = deserialize(defaultExampleText);
+      dispatch({ type: "loadModel", model: example });
+    } catch (e) {
+      // Bundled example shouldn't ever fail to parse, but if it does
+      // (e.g. someone bumped serialise version without migrating it)
+      // we just stay on the empty INITIAL_STATE rather than crashing.
+      console.warn("[bem] bundled default example failed to load:", e);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
