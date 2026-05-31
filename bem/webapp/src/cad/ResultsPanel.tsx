@@ -11,8 +11,11 @@
 
 import {
   bandEdgeValues,
+  bandEdgeValuesSequential,
   divergingGradientCss,
   divergingUxColor,
+  sequentialGradientCss,
+  sequentialUxColor,
 } from "./colorScale.js";
 
 export type InteriorField =
@@ -25,6 +28,13 @@ export type InteriorField =
   | "s1"
   | "s2"
   | "tmax";
+
+/** Fields that are ≥ 0 by definition (sums-of-squares, magnitudes).
+ *  These use a sequential 0→max colour scale instead of the diverging
+ *  ±range scale used for fields that can swing either way. */
+export function isPositiveOnlyField(field: InteriorField): boolean {
+  return field === "svm" || field === "tmax";
+}
 
 export interface FieldStats {
   /** Actual minimum value across the triangulation. */
@@ -178,7 +188,7 @@ export function ResultsPanel({
           Scale {activeField ? `(${activeLabel})` : ""}
         </div>
         {activeField && stats ? (
-          <ScaleLegend stats={stats} />
+          <ScaleLegend stats={stats} activeField={activeField} />
         ) : (
           <div className="results-hint">
             {canShowResults
@@ -417,15 +427,30 @@ function EdgeProfilePlot({ profile }: { readonly profile: EdgeProfile }) {
   );
 }
 
-function ScaleLegend({ stats }: { readonly stats: FieldStats }) {
+function ScaleLegend({
+  stats,
+  activeField,
+}: {
+  readonly stats: FieldStats;
+  readonly activeField: InteriorField;
+}) {
+  // Positive-only fields (σvm, τmax) use a 0→max sequential scale;
+  // everything else uses the symmetric diverging scale.
+  const positive = isPositiveOnlyField(activeField);
   // One label per band edge — these are the exact values at which the
   // canvas colour jumps from one contour to the next.
-  const edges = bandEdgeValues(stats.range);
+  const edges = positive
+    ? bandEdgeValuesSequential(stats.range)
+    : bandEdgeValues(stats.range);
+  const gradient = positive ? sequentialGradientCss() : divergingGradientCss();
+  const topSwatch = positive ? sequentialUxColor(1) : divergingUxColor(1);
+  const bottomSwatch = positive ? sequentialUxColor(0) : divergingUxColor(-1);
+  const bottomLabel = positive ? "data min" : "data min";
   return (
     <div className="results-scale">
       <div
         className="results-scale-bar"
-        style={{ background: divergingGradientCss() }}
+        style={{ background: gradient }}
         aria-hidden="true"
       />
       <div className="results-scale-labels">
@@ -439,16 +464,16 @@ function ScaleLegend({ stats }: { readonly stats: FieldStats }) {
         <div>
           <span
             className="results-scale-swatch"
-            style={{ background: divergingUxColor(1) }}
+            style={{ background: topSwatch }}
           />
           data max: <strong>{fmtSci(stats.max)}</strong>
         </div>
         <div>
           <span
             className="results-scale-swatch"
-            style={{ background: divergingUxColor(-1) }}
+            style={{ background: bottomSwatch }}
           />
-          data min: <strong>{fmtSci(stats.min)}</strong>
+          {bottomLabel}: <strong>{fmtSci(stats.min)}</strong>
         </div>
       </div>
     </div>

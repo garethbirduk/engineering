@@ -47,12 +47,13 @@ import {
 import { Toolbar } from "./Toolbar.js";
 import { InfoPanel } from "./InfoPanel.js";
 import {
+  isPositiveOnlyField,
   ResultsPanel,
   type EdgeProfile,
   type FieldStats,
   type InteriorField,
 } from "./ResultsPanel.js";
-import { divergingUxColor } from "./colorScale.js";
+import { divergingUxColor, sequentialUxColor } from "./colorScale.js";
 import { gridStepForViewWidth } from "./gridStep.js";
 import { snapWorld } from "./snap.js";
 import { pointMap } from "./operations.js";
@@ -915,7 +916,9 @@ export function CadCanvas() {
    *  user can see when clipping is happening. */
   const interiorFieldStats: FieldStats | null = useMemo(() => {
     if (!interiorFieldValues || interiorFieldValues.length === 0) return null;
+    if (interiorField === null) return null;
     const SCALE_PERCENTILE = 0.95;
+    const positive = isPositiveOnlyField(interiorField);
 
     const finite: number[] = [];
     for (const v of interiorFieldValues) {
@@ -930,15 +933,31 @@ export function CadCanvas() {
       if (v > max) max = v;
     }
 
-    const absSorted = finite.map(Math.abs).sort((a, b) => a - b);
-    const pIdx = Math.min(
-      absSorted.length - 1,
-      Math.floor(absSorted.length * SCALE_PERCENTILE),
-    );
-    const range = absSorted[pIdx]!;
+    // Range for the colour scale:
+    //   diverging fields → 95th percentile of |v|, symmetric ±range
+    //   positive-only    → 95th percentile of v itself, scale runs 0..range
+    // Outliers above the percentile still render (saturated in the top
+    // band) but no longer pin the scale.
+    let range: number;
+    if (positive) {
+      const posSorted = finite.filter((v) => v >= 0).sort((a, b) => a - b);
+      if (posSorted.length === 0) return null;
+      const pIdx = Math.min(
+        posSorted.length - 1,
+        Math.floor(posSorted.length * SCALE_PERCENTILE),
+      );
+      range = posSorted[pIdx]!;
+    } else {
+      const absSorted = finite.map(Math.abs).sort((a, b) => a - b);
+      const pIdx = Math.min(
+        absSorted.length - 1,
+        Math.floor(absSorted.length * SCALE_PERCENTILE),
+      );
+      range = absSorted[pIdx]!;
+    }
     if (range === 0) return null;
     return { min, max, range };
-  }, [interiorFieldValues]);
+  }, [interiorFieldValues, interiorField]);
 
   /** Can the Results panel show anything useful right now? */
   const canShowInteriorResults =
@@ -1791,6 +1810,16 @@ export function CadCanvas() {
                 interiorFieldStats !== null &&
                 internalTriangles && (() => {
                   const range = interiorFieldStats.range;
+                  const positive = isPositiveOnlyField(interiorField);
+                  // Map raw value v to a t the colour function expects:
+                  //   diverging → t = v / range, ∈ [-1, +1]
+                  //   positive  → t = v / range, ∈ [0, +1]
+                  // The colour function then quantises t into 11 bands
+                  // and looks up the palette.
+                  const colorOf = (v: number): string =>
+                    positive
+                      ? sequentialUxColor(v / range)
+                      : divergingUxColor(v / range);
                   const N = 4;
                   const polys: React.ReactElement[] = [];
                   // Hairline seal stroke matching fill — kills the
@@ -1821,8 +1850,8 @@ export function CadCanvas() {
                         const p1 = at(i / N, j / N, (N - i - j) / N);
                         const p2 = at((i + 1) / N, j / N, (N - i - j - 1) / N);
                         const p3 = at(i / N, (j + 1) / N, (N - i - j - 1) / N);
-                        const cv = (p1.v + p2.v + p3.v) / 3 / range;
-                        const fill = divergingUxColor(cv);
+                        const cvVal = (p1.v + p2.v + p3.v) / 3;
+                        const fill = colorOf(cvVal);
                         polys.push(
                           <polygon
                             key={`up-${ti}-${i}-${j}`}
@@ -1840,8 +1869,8 @@ export function CadCanvas() {
                             (N - i - j - 2) / N,
                           );
                           const q3 = p3;
-                          const cvd = (q1.v + q2.v + q3.v) / 3 / range;
-                          const fillD = divergingUxColor(cvd);
+                          const cvdVal = (q1.v + q2.v + q3.v) / 3;
+                          const fillD = colorOf(cvdVal);
                           polys.push(
                             <polygon
                               key={`dn-${ti}-${i}-${j}`}
