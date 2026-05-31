@@ -379,55 +379,12 @@ export function CadCanvas() {
    *  one element AND the solver returned a non-zero motion. */
   const canShowResults = solvedMesh.length > 0 && deformedScale !== null;
 
-  /** Internal nodes — concentric rings inward from every element at
-   *  successive offsets (0.25, 0.5, … × element chord). Each ring uses
-   *  the same localNodes η positions (radially aligned). Dedup only on
-   *  near-exact coincidence — no boundary filtering yet; future rings
-   *  will fill out toward the centre once filtering returns. */
-  const internalNodes: readonly Vec2[] = useMemo(() => {
-    if (meshElements.length === 0) return [];
-    const ANCHORS = STANDARD_NODES.continuous;
-    const RING_OFFSET_FACTORS: readonly number[] = [0.25, 0.75];
-    const COINCIDENT_TOL = 1e-6;
-    const COINCIDENT_TOL2 = COINCIDENT_TOL * COINCIDENT_TOL;
-    const out: Vec2[] = [];
-    const addUnique = (p: Vec2) => {
-      for (const q of out) {
-        const dx = p.x - q.x;
-        const dy = p.y - q.y;
-        if (dx * dx + dy * dy < COINCIDENT_TOL2) return;
-      }
-      out.push(p);
-    };
-    for (const el of meshElements) {
-      const a0 = el.anchors[0];
-      const a1 = el.anchors[1];
-      const a2 = el.anchors[2];
-      const chord = Math.hypot(a2.x - a0.x, a2.y - a0.y);
-      if (chord === 0) continue;
-      for (const factor of RING_OFFSET_FACTORS) {
-        const offset = factor * chord;
-        for (const eta of el.localNodes) {
-          const Ns = shapeFunctions(eta, ANCHORS);
-          const px = Ns[0] * a0.x + Ns[1] * a1.x + Ns[2] * a2.x;
-          const py = Ns[0] * a0.y + Ns[1] * a1.y + Ns[2] * a2.y;
-          const dN = shapeFunctionDerivatives(eta, ANCHORS);
-          const tx = dN[0] * a0.x + dN[1] * a1.x + dN[2] * a2.x;
-          const ty = dN[0] * a0.y + dN[1] * a1.y + dN[2] * a2.y;
-          const tl = Math.hypot(tx, ty) || 1;
-          const nx = ty / tl;
-          const ny = -tx / tl;
-          addUnique({ x: px - nx * offset, y: py - ny * offset });
-        }
-      }
-    }
-    return out;
-  }, [meshElements]);
   const canShowInternalNodes = model.domains.length > 0;
 
   /** Domain boundary polygons (outer CCW + holes CW) sampled from the
    *  geometry — outer + arc-subdivisions per arc segment. Used to
-   *  filter Delaunay triangles by centroid. */
+   *  filter Delaunay triangles by centroid AND to gate the wave-front
+   *  internal-node placement below. */
   const boundaryPolygons = useMemo(() => {
     if (model.domains.length === 0) return null;
     const ARC_SAMPLES = 12;
@@ -476,6 +433,160 @@ export function CadCanvas() {
     }
     return null;
   }, [model.points, model.lines, model.boundaries, model.domains]);
+
+  /** Internal post-process nodes — wave-front placement.
+   *
+   *  For every boundary BEM element we drop perpendicular rings inward
+   *  along the element's local inward normal. Rings alternate the
+   *  tangential η pattern:
+   *    odd k (1, 3, 5…) → midpoints between localNodes (e.g. ±0.5 for
+   *      continuous, ±1/3 for discontinuous). 2 candidates per element.
+   *    even k (2, 4, 6…) → the localNodes themselves (e.g. -1, 0, +1).
+   *      3 per element; corner η=±1 candidates coincide with the
+   *      neighbouring element's ∓1 and get deduped by the cluster
+   *      filter, no extra cost.
+   *  Radial depth doubles: r_k = 0.25·L · 2^(k-1), where L is the
+   *  element's chord. So 0.25L, 0.5L, 1.0L, 2.0L, …
+   *
+   *  The loop is depth-first across elements: ring k is computed for
+   *  ALL active elements before moving to ring k+1. This way candidates
+   *  see ALL elements' previously-accepted points in the cluster filter,
+   *  so waves growing from opposite boundaries genuinely meet in the
+   *  middle and halt cleanly. (Previous per-element layout let one
+   *  element march all the way across the domain before the opposite
+   *  element fired its first ring — waves never met, runaway rings.)
+   *
+   *  Filters per candidate:
+   *    in-domain — inside outer polygon AND outside every hole.
+   *    cluster   — at least 0.5 · r_k from any already-accepted point.
+   *                Seeds the accepted set with BEM nodes + corner
+   *                Points so the cluster check covers the boundary too.
+   *
+   *  Halt: as soon as ring k accepts zero candidates across all
+   *  remaining active elements, the wave fronts have collectively
+   *  filled the domain — stop. Also: any element whose own ring
+   *  accepts zero is marked done and skipped on subsequent rings. */
+  const internalNodes: readonly Vec2[] = useMemo(() => {
+    if (meshElements.length === 0) return [];
+    if (!boundaryPolygons) return [];
+
+    const ANCHORS = STANDARD_NODES.continuous;
+    const FIRST_RING_FACTOR = 0.25;
+    const RING_GROWTH = 2.0;
+    const CLUSTER_FACTOR = 0.5;
+    const MAX_RINGS = 12;
+
+    const isInDomain = (p: Vec2): boolean => {
+      if (!pointInPolygon(p, boundaryPolygons.outer)) return false;
+      for (const hole of boundaryPolygons.holes) {
+        if (pointInPolygon(p, hole)) return false;
+      }
+      return true;
+    };
+
+    // Seed accepted set with the boundary itself (BEM nodes + corner
+    // Points). Cluster filter checks against this, so interior candidates
+    // can't pile up on top of boundary positions.
+    const accepted: Vec2[] = [];
+    for (const el of meshElements) {
+      for (const n of el.nodes) accepted.push({ x: n.x, y: n.y });
+    }
+    for (const p of model.points) accepted.push({ x: p.x, y: p.y });
+    const seedCount = accepted.length;
+
+    // Per-element chord length — used for the ring offset schedule.
+    const chords = meshElements.map((el) => {
+      const a0 = el.anchors[0];
+      const a2 = el.anchors[2];
+      return Math.hypot(a2.x - a0.x, a2.y - a0.y);
+    });
+
+    // η patterns for each parity. We construct them per element because
+    // localNodes can vary (continuous vs discontinuous vs custom).
+    const midpoints = (
+      ln: readonly [number, number, number],
+    ): readonly number[] => [(ln[0] + ln[1]) / 2, (ln[1] + ln[2]) / 2];
+    const nodePos = (
+      ln: readonly [number, number, number],
+    ): readonly number[] => ln;
+
+    const elementActive: boolean[] = new Array(meshElements.length).fill(
+      true,
+    );
+
+    for (let k = 1; k <= MAX_RINGS; k++) {
+      const isOdd = k % 2 === 1;
+      let ringAccepted = 0;
+
+      for (let ei = 0; ei < meshElements.length; ei++) {
+        if (!elementActive[ei]) continue;
+        const el = meshElements[ei]!;
+        const L = chords[ei]!;
+        if (L === 0) {
+          elementActive[ei] = false;
+          continue;
+        }
+
+        const r = FIRST_RING_FACTOR * L * Math.pow(RING_GROWTH, k - 1);
+        const cluster = CLUSTER_FACTOR * r;
+        const cluster2 = cluster * cluster;
+        const pattern = isOdd ? midpoints(el.localNodes) : nodePos(el.localNodes);
+        const a0 = el.anchors[0];
+        const a1 = el.anchors[1];
+        const a2 = el.anchors[2];
+
+        let acceptedThisElement = 0;
+        for (const eta of pattern) {
+          // Position + inward normal at this η on the element's
+          // isoparametric geometry.
+          const Ns = shapeFunctions(eta, ANCHORS);
+          const dN = shapeFunctionDerivatives(eta, ANCHORS);
+          const px = Ns[0] * a0.x + Ns[1] * a1.x + Ns[2] * a2.x;
+          const py = Ns[0] * a0.y + Ns[1] * a1.y + Ns[2] * a2.y;
+          const dx = dN[0] * a0.x + dN[1] * a1.x + dN[2] * a2.x;
+          const dy = dN[0] * a0.y + dN[1] * a1.y + dN[2] * a2.y;
+          const tl = Math.hypot(dx, dy) || 1;
+          // Inward normal = -(right-of-tangent) = (-dy, +dx)/|t|. The
+          // sign convention works for both outer (CCW) and hole (CW)
+          // loops because both traverse with the material on the left.
+          const nx = -dy / tl;
+          const ny = dx / tl;
+          const cand: Vec2 = { x: px + nx * r, y: py + ny * r };
+
+          if (!isInDomain(cand)) continue;
+
+          let tooClose = false;
+          for (let qi = 0; qi < accepted.length; qi++) {
+            const q = accepted[qi]!;
+            const ex = cand.x - q.x;
+            const ey = cand.y - q.y;
+            if (ex * ex + ey * ey < cluster2) {
+              tooClose = true;
+              break;
+            }
+          }
+          if (tooClose) continue;
+
+          accepted.push(cand);
+          acceptedThisElement++;
+        }
+
+        if (acceptedThisElement === 0) {
+          // This element's wave has met another wave (or left the
+          // domain). It's done for the rest of the loop.
+          elementActive[ei] = false;
+        }
+        ringAccepted += acceptedThisElement;
+      }
+
+      // No active element added anything this ring → ALL waves have
+      // collectively met. Stop.
+      if (ringAccepted === 0) break;
+    }
+
+    // Return only the interior additions (drop the boundary seeds).
+    return accepted.slice(seedCount);
+  }, [meshElements, model.points, boundaryPolygons]);
 
   /** Delaunay triangulation of (boundary BEM nodes + corner Points +
    *  interior nodes), filtered to keep only triangles whose centroid
