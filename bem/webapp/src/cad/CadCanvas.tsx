@@ -899,18 +899,43 @@ export function CadCanvas() {
     return out;
   }, [internalTriangles, solvedMesh, interiorField, interiorStresses, material]);
 
-  /** Actual min, max + symmetric range (max |v|) of the active field. */
+  /** Actual min, max + a robust symmetric range for the colour scale.
+   *
+   *  Stress-recovery at boundary-adjacent vertices is inherently noisy
+   *  (near-singular kernels even after the neighbour-averaging mask),
+   *  and stress concentrations at holes can spike well above the bulk
+   *  field. Either source would pin `max|v|` and squash the interior
+   *  variation into the central colour band.
+   *
+   *  Instead of using the true max-abs as the colour scale range, we
+   *  use a high-percentile clip (default 95th of |finite values|).
+   *  Outliers above this still render (clipped to the top/bottom
+   *  band) but no longer steal scale resolution from the bulk field.
+   *  Data min / max are still reported underneath the legend so the
+   *  user can see when clipping is happening. */
   const interiorFieldStats: FieldStats | null = useMemo(() => {
     if (!interiorFieldValues || interiorFieldValues.length === 0) return null;
+    const SCALE_PERCENTILE = 0.95;
+
+    const finite: number[] = [];
+    for (const v of interiorFieldValues) {
+      if (Number.isFinite(v)) finite.push(v);
+    }
+    if (finite.length === 0) return null;
+
     let min = Infinity;
     let max = -Infinity;
-    for (const v of interiorFieldValues) {
-      if (!Number.isFinite(v)) continue;
+    for (const v of finite) {
       if (v < min) min = v;
       if (v > max) max = v;
     }
-    if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
-    const range = Math.max(Math.abs(min), Math.abs(max));
+
+    const absSorted = finite.map(Math.abs).sort((a, b) => a - b);
+    const pIdx = Math.min(
+      absSorted.length - 1,
+      Math.floor(absSorted.length * SCALE_PERCENTILE),
+    );
+    const range = absSorted[pIdx]!;
     if (range === 0) return null;
     return { min, max, range };
   }, [interiorFieldValues]);
