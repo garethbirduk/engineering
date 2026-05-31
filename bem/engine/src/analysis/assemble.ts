@@ -232,7 +232,16 @@ function buildNodeRegistry(mesh: readonly MeshElement[]): {
 
   for (const el of mesh) {
     const idxs: [number, number, number] = [-1, -1, -1];
-    for (let k = 0; k < 3; k++) {
+    // Walk node indices in boundary-traversal order so the FIRST node
+    // along the boundary walk gets the smallest fresh global index.
+    // For native (direction = +1) elements that's [0,1,2]; for reversed
+    // elements (segment direction = -1) that's [2,1,0]. The element's
+    // own data (anchors, localNodes, nodes[]) is unchanged either way —
+    // only the assignment ORDER differs, which is what fixes the row
+    // order in H/G/u/t to follow the boundary.
+    const reversed = el.traverseReversed === true;
+    for (let step = 0; step < 3; step++) {
+      const k = reversed ? 2 - step : step;
       const node = el.nodes[k]!;
       const key = posKey(node);
       let idx = nodeIndexByKey.get(key);

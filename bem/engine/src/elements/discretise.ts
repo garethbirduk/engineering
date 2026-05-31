@@ -19,8 +19,10 @@
 import { arcPoint } from "../geometry/arc.js";
 import type {
   BcAssignment,
+  Boundary,
   CadModel,
   DirectionBc,
+  Id,
   Line,
   Point,
   Vec2,
@@ -128,6 +130,18 @@ export interface MeshElement {
   readonly localNodes: readonly [number, number, number];
   /** Parent-line parametric t corresponding to each node. */
   readonly nodeTs: readonly [number, number, number];
+  /** True when this element belongs to a boundary segment with
+   *  direction = -1 — i.e. the boundary is traversed against the line's
+   *  native start→end. The element's own data (anchors, nodes,
+   *  localNodes, indexInLine, tStart/tEnd) is unchanged; only its
+   *  position in the global mesh array reflects the boundary walk.
+   *
+   *  The assembler reads this flag to walk node indices [2,1,0]
+   *  instead of [0,1,2] when assigning global DOF indices, so adjacent
+   *  rows of H/G/u/t correspond to geometrically adjacent DOFs along
+   *  the boundary traversal — making the system matrix's row order
+   *  follow boundary → line → element → node (boundary-walk side) → axis. */
+  readonly traverseReversed?: boolean;
 }
 
 export interface DiscretiseOptions {
@@ -162,6 +176,7 @@ export function pointAtT(
  */
 export function discretiseLines(
   model: Pick<CadModel, "lines" | "points"> & {
+    boundaries?: readonly Boundary[];
     meshing?: readonly {
       readonly lineId: string;
       readonly elementsPerLine?: number;
@@ -183,8 +198,11 @@ export function discretiseLines(
   const bcByLineId = new Map(
     (model.bcs ?? []).map((b) => [b.lineId, b] as const),
   );
-  const out: MeshElement[] = [];
 
+  // Phase 1 — discretise each line independently into its native (start →
+  // end) sequence of elements. Stored by lineId so phase 2 can pull them
+  // out in boundary-traversal order.
+  const elementsByLineId = new Map<Id, MeshElement[]>();
   for (const line of model.lines) {
     const override = meshingByLineId.get(line.id);
     const n = Math.max(1, Math.floor(override?.elementsPerLine ?? defaultN));
@@ -195,6 +213,7 @@ export function discretiseLines(
     // line — the BC applies uniformly. The solver later replaces NaN
     // entries with computed values.
     const nodeDofs = nodeDofsFromBc(bcByLineId.get(line.id));
+    const lineElems: MeshElement[] = [];
 
     for (let i = 0; i < n; i++) {
       // Per-element override wins over the line-level base.
@@ -228,7 +247,7 @@ export function discretiseLines(
         nodeTs.push(tStart + local * (tEnd - tStart));
       }
 
-      out.push({
+      lineElems.push({
         lineId: line.id,
         indexInLine: i,
         tStart,
@@ -241,6 +260,46 @@ export function discretiseLines(
         nodeTs: [nodeTs[0]!, nodeTs[1]!, nodeTs[2]!] as const,
       });
     }
+    elementsByLineId.set(line.id, lineElems);
+  }
+
+  // Phase 2 — flatten into mesh order. Walk every boundary's segments in
+  // order, honouring direction. The mesh array's order drives the global
+  // DOF ordering in assembleHG (collocation row index = order of first
+  // appearance), so this is what gives H/G/u/t the
+  //   boundary → line → element → node (boundary-walk side) → axis
+  // row layout.
+  //
+  // Reversed segments (direction = -1): emit that line's elements in
+  // reverse order and tag each with `traverseReversed: true`. The flag
+  // tells assembleHG's node-registry pass to walk node indices [2,1,0]
+  // instead of [0,1,2], so within the element the boundary-walk-first
+  // node still gets the smallest fresh global index.
+  //
+  // Lines not referenced by ANY boundary segment are appended at the end
+  // in JSON order (covers minimal test models that omit boundaries and
+  // any in-progress geometry the user hasn't committed to a boundary).
+  const out: MeshElement[] = [];
+  const visited = new Set<Id>();
+  for (const boundary of model.boundaries ?? []) {
+    for (const segment of boundary.segments) {
+      const lineElems = elementsByLineId.get(segment.lineId);
+      if (!lineElems) continue;
+      visited.add(segment.lineId);
+      if (segment.direction === 1) {
+        for (const el of lineElems) out.push(el);
+      } else {
+        for (let i = lineElems.length - 1; i >= 0; i--) {
+          out.push({ ...lineElems[i]!, traverseReversed: true });
+        }
+      }
+    }
+  }
+  for (const line of model.lines) {
+    if (visited.has(line.id)) continue;
+    const lineElems = elementsByLineId.get(line.id);
+    if (!lineElems) continue;
+    for (const el of lineElems) out.push(el);
   }
   return out;
 }
