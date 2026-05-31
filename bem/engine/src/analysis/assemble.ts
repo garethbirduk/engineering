@@ -16,11 +16,87 @@
 
 import { Matrix } from "ml-matrix";
 import type { MeshElement, MeshNode } from "../elements/discretise.js";
-import { integrateOverElement } from "./elementIntegration.js";
+import {
+  integrateOverElement,
+  type ElementBlocks,
+} from "./elementIntegration.js";
 import type { MaterialProperties } from "./kernels.js";
 
 /** Tolerance for deduplicating mesh nodes by world position. */
 const POS_EPS = 1e-9;
+/** Tolerance for hashing element/material content into cache keys —
+ *  loose enough to absorb float-equality noise from re-derived
+ *  positions, tight enough that a real edit changes the key. */
+const KEY_EPS = 1e-12;
+
+// ─────────────────────────────────────────────────────────────────────
+// Reanalysis cache — element-level
+// ─────────────────────────────────────────────────────────────────────
+//
+// Each (collocation_position, field_element, material) tuple maps to a
+// 2×6 H block and 2×6 G block. The block depends only on those three
+// inputs (kernels are functions of geometry + material; BCs and solved
+// DOFs are not in here). So between successive assembleHG calls — as
+// long as a triple repeats — we can skip integrateOverElement and
+// scatter the cached block straight into the global H, G.
+//
+// Typical interactive edit (one Point dragged on a many-element model):
+//   - Elements whose anchors reference the moved Point are "dirty" —
+//     their content key changes, so any pair involving them misses.
+//   - Every other element-pair is clean → cache hit → no integration.
+//
+// The cache is mutated in place by assembleHG. Caller owns its lifetime
+// (typically a React useRef in the webapp, a module variable in tests).
+// Stale entries (positions no longer used by any element) accumulate
+// until cleared; a sweep step prunes them at end of each assemble.
+
+/** Cached H + G 2×6 blocks for a single (collocation, field-el, mat) triple. */
+export type CachedPairBlocks = ElementBlocks;
+
+/** Caller-owned reanalysis cache. Hand the same instance to successive
+ *  `assembleHG` calls to keep its hits. */
+export type BlockCache = Map<string, CachedPairBlocks>;
+
+/** Build a fresh empty cache. Cheap; mostly for clarity at call sites. */
+export function createBlockCache(): BlockCache {
+  return new Map();
+}
+
+/** Stable content key for a single MeshElement — anchors + localNodes
+ *  rounded to a tight tolerance so float-equality noise on re-derived
+ *  positions doesn't trip the cache. */
+function elementContentKey(el: MeshElement): string {
+  const q = (x: number) => Math.round(x / KEY_EPS);
+  const a0 = el.anchors[0];
+  const a1 = el.anchors[1];
+  const a2 = el.anchors[2];
+  const ln = el.localNodes;
+  return (
+    `${q(a0.x)},${q(a0.y)}|${q(a1.x)},${q(a1.y)}|${q(a2.x)},${q(a2.y)}|` +
+    `${q(ln[0])},${q(ln[1])},${q(ln[2])}`
+  );
+}
+
+/** Stable content key for a material — every kernel call's outcome
+ *  depends on (E, ν, planeKind). */
+function materialContentKey(material: MaterialProperties): string {
+  return `${material.E}|${material.nu}|${material.planeKind}`;
+}
+
+/** Stable content key for a collocation point position. */
+function positionKey(p: { readonly x: number; readonly y: number }): string {
+  const q = (x: number) => Math.round(x / KEY_EPS);
+  return `${q(p.x)},${q(p.y)}`;
+}
+
+/** Full cache key for a (collocation, field-el, material) triple. */
+function pairKey(
+  s: { readonly x: number; readonly y: number },
+  field: MeshElement,
+  matKey: string,
+): string {
+  return `${positionKey(s)}::${elementContentKey(field)}::${matKey}`;
+}
 
 export interface AssembledSystem {
   readonly H: Matrix; // 2N × 2N
@@ -156,16 +232,33 @@ function buildNodeRegistry(mesh: readonly MeshElement[]): {
  * Assemble H and G for the given mesh + material. Diagonal H blocks
  * filled by the rigid-body trick (so each row of H sums to zero in
  * the 2×2 block sense).
+ *
+ * If a `cache` is passed, the per-pair (collocation, field-element)
+ * 2×6 integration blocks are looked up before calling integrateOver-
+ * Element. Hits skip integration entirely; misses populate the cache
+ * for the next call. Stale entries (positions / elements no longer
+ * present in this mesh) are pruned at the end of the call so the
+ * cache stays bounded.
+ *
+ * The rigid-body trick still runs from scratch every call — it's a
+ * row-sum over all current off-diagonal H entries, and global node
+ * indices can shift between calls, so there's nothing to reuse there.
+ * Cost is O(N²) sums of scalars, dwarfed by the integration we just
+ * skipped.
  */
 export function assembleHG(
   mesh: readonly MeshElement[],
   material: MaterialProperties,
+  cache?: BlockCache,
 ): AssembledSystem {
   const registry = buildNodeRegistry(mesh);
   const N = registry.nodesByIndex.length;
   const size = 2 * N;
   const H = Matrix.zeros(size, size);
   const G = Matrix.zeros(size, size);
+
+  const matKey = materialContentKey(material);
+  const usedKeys = cache ? new Set<string>() : null;
 
   // For each collocation node i (global index ic), integrate over every
   // element j, accumulating into H and G at rows [2ic, 2ic+1] and
@@ -184,7 +277,23 @@ export function assembleHG(
       else if (elNodeIdxs[1] === ic) singularLocalIdx = 1;
       else if (elNodeIdxs[2] === ic) singularLocalIdx = 2;
 
-      const blocks = integrateOverElement(s, el, material, singularLocalIdx);
+      // Cache lookup. The singular flag isn't part of the key because
+      // it's a deterministic function of the (position, element)
+      // content: same position + same element → same singular outcome.
+      let blocks: ElementBlocks;
+      if (cache) {
+        const key = pairKey(s, el, matKey);
+        usedKeys!.add(key);
+        const hit = cache.get(key);
+        if (hit) {
+          blocks = hit;
+        } else {
+          blocks = integrateOverElement(s, el, material, singularLocalIdx);
+          cache.set(key, blocks);
+        }
+      } else {
+        blocks = integrateOverElement(s, el, material, singularLocalIdx);
+      }
 
       // Scatter the 2×6 block into the global matrices.
       for (let nodeK = 0; nodeK < 3; nodeK++) {
@@ -220,6 +329,15 @@ export function assembleHG(
       }
       H.set(row, 2 * ic, -sum0);
       H.set(row, 2 * ic + 1, -sum1);
+    }
+  }
+
+  // Prune stale cache entries — any key we didn't touch this call is
+  // no longer reachable from the current mesh (element moved or got
+  // deleted), so keeping it just leaks memory.
+  if (cache && usedKeys) {
+    for (const k of cache.keys()) {
+      if (!usedKeys.has(k)) cache.delete(k);
     }
   }
 

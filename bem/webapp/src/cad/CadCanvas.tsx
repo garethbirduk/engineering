@@ -30,6 +30,7 @@ import {
   arcPoint,
   arcSvgPathD,
   boundaryStress,
+  createBlockCache,
   discretiseLines,
   interiorDisplacement,
   interiorStress,
@@ -39,6 +40,7 @@ import {
   shapeFunctionDerivatives,
   solve,
   STANDARD_NODES,
+  type BlockCache,
   type MaterialProperties,
   type MeshElement,
   type StressTriple,
@@ -344,10 +346,21 @@ export function CadCanvas() {
     [model],
   );
 
-  // Solve. Memoised — runs synchronously on every model change (cheap in
-  // 2D for the stub). Real BEM kernel drops in behind the same signature.
+  // Reanalysis cache for the BEM H/G blocks — held across renders so
+  // incremental edits (one Point dragged, one BC tweaked) reuse the
+  // (collocation, field-element, material) pairs that didn't change.
+  // assembleHG mutates the cache in place; stale entries are pruned
+  // there. We never replace this ref's identity — solve() doesn't care
+  // about it being a stable React value, only that the contents
+  // persist across calls.
+  const blockCacheRef = useRef<BlockCache>(createBlockCache());
+
+  // Solve. Memoised — runs on every mesh / material change. With the
+  // cache passed through, only the pair-blocks touching modified
+  // elements get re-integrated; everything else reuses its cached
+  // contribution.
   const solvedMesh = useMemo(
-    () => solve(meshElements, material),
+    () => solve(meshElements, material, blockCacheRef.current),
     [meshElements, material],
   );
 

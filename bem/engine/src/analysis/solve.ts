@@ -18,7 +18,7 @@
 
 import { Matrix, solve as solveLinear } from "ml-matrix";
 import type { MeshElement, MeshNode } from "../elements/discretise.js";
-import { assembleHG } from "./assemble.js";
+import { assembleHG, type BlockCache } from "./assemble.js";
 import {
   DEFAULT_MATERIAL,
   shearModulus,
@@ -41,10 +41,11 @@ export { DEFAULT_MATERIAL, type MaterialProperties };
 export function solve(
   mesh: readonly MeshElement[],
   material: MaterialProperties = DEFAULT_MATERIAL,
+  cache?: BlockCache,
 ): MeshElement[] {
   if (mesh.length === 0) return [];
 
-  const sys = assembleHG(mesh, material);
+  const sys = assembleHG(mesh, material, cache);
   const N = sys.nodesByIndex.length;
   const size = 2 * N;
 
