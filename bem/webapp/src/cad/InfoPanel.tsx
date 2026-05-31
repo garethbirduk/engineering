@@ -353,6 +353,37 @@ function MultiSummary({
   for (const s of selection) counts[s.kind]++;
   const arcCount = countSelectedArcs(model, selection);
 
+  // Collect line IDs in selection order. BC + meshing edits below apply
+  // uniformly to every line in this list.
+  const selectedLineIds = selection
+    .filter((s): s is Extract<SelectionItem, { kind: "line" }> => s.kind === "line")
+    .map((s) => s.id);
+  const firstLineId = selectedLineIds[0];
+  const firstLineBc = firstLineId
+    ? getBcAssignment(model, firstLineId)
+    : undefined;
+  const firstLineMeshing = firstLineId
+    ? getLineDiscretisation(model, firstLineId)
+    : undefined;
+
+  const setBcOnAll = (
+    direction: "x" | "y",
+    next: DirectionBc | undefined,
+  ) => {
+    for (const id of selectedLineIds) {
+      onDispatch({ type: "setLineBc", lineId: id, direction, bc: next });
+    }
+  };
+  const setMeshingOnAll = (
+    next: Omit<LineDiscretisation, "lineId"> | undefined,
+  ) => {
+    for (const id of selectedLineIds) {
+      onDispatch({ type: "setLineMeshing", lineId: id, value: next });
+    }
+  };
+
+  const linesPlural = counts.line === 1 ? "line" : `${counts.line} lines`;
+
   return (
     <>
       <dl className="cad-info-dl">
@@ -374,7 +405,7 @@ function MultiSummary({
               onClick={() => onDispatch({ type: "flipSelectedLines" })}
               title="Flip the direction of every selected line (F)"
             >
-              Flip {counts.line === 1 ? "line" : `${counts.line} lines`}
+              Flip {linesPlural}
               <kbd>F</kbd>
             </button>
           )}
@@ -391,6 +422,36 @@ function MultiSummary({
             </button>
           )}
         </div>
+      )}
+      {/* BC + meshing editors apply uniformly to every line in the
+          selection. The displayed values come from the FIRST selected
+          line (selection-order representative); any edit propagates to
+          all selected lines, overwriting whatever they each had. */}
+      {selectedLineIds.length > 0 && (
+        <>
+          <div className="cad-bc-section">
+            <div className="cad-bc-title">
+              Boundary conditions{" "}
+              <span className="cad-bc-applies">
+                (apply to all {linesPlural})
+              </span>
+            </div>
+            <BcEditor
+              axis="x"
+              bc={firstLineBc?.x}
+              onChange={(next) => setBcOnAll("x", next)}
+            />
+            <BcEditor
+              axis="y"
+              bc={firstLineBc?.y}
+              onChange={(next) => setBcOnAll("y", next)}
+            />
+          </div>
+          <MeshingEditor
+            meshing={firstLineMeshing}
+            onChange={setMeshingOnAll}
+          />
+        </>
       )}
     </>
   );

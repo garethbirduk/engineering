@@ -500,6 +500,15 @@ body,
   margin-bottom: 0.4rem;
 }
 
+.cad-bc-applies {
+  font-weight: 400;
+  text-transform: none;
+  letter-spacing: 0;
+  font-style: italic;
+  opacity: 0.85;
+  margin-left: 0.35rem;
+}
+
 .cad-bc-row {
   display: flex;
   align-items: center;
