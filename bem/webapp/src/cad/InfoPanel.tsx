@@ -55,6 +55,10 @@ interface InfoPanelProps {
    *  the line-selection yellow with orange, so the user sees the
    *  drilled-down element scope only while hovering. */
   readonly matrixHoveredDofs: ReadonlySet<number>;
+  /** Reverse direction: matrix-view fires this with the DOF row index
+   *  it's currently hovering, so the canvas can light up the
+   *  corresponding mesh node + containing elements. null = no hover. */
+  readonly onHoverMatrixDof: (dof: number | null) => void;
 }
 
 export function InfoPanel({
@@ -65,6 +69,7 @@ export function InfoPanel({
   solveStats,
   matrixHighlightedDofs,
   matrixHoveredDofs,
+  onHoverMatrixDof,
 }: InfoPanelProps) {
   return (
     <aside className="cad-info" aria-label="Inspector">
@@ -77,6 +82,7 @@ export function InfoPanel({
             solveStats={solveStats}
             highlightedDofs={matrixHighlightedDofs}
             hoveredDofs={matrixHoveredDofs}
+            onHoverMatrixDof={onHoverMatrixDof}
           />
         )}
         {renderBody(model, selection, onDispatch)}

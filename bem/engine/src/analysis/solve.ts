@@ -18,6 +18,7 @@
 
 import { Matrix, solve as solveLinear } from "ml-matrix";
 import type { MeshElement, MeshNode } from "../elements/discretise.js";
+import type { Vec2 } from "../geometry/types.js";
 import {
   assembleHG,
   type AssembleStats,
@@ -45,6 +46,16 @@ export interface SolveStats {
   readonly unknownDofs: number;
   readonly dofsByLineId: ReadonlyMap<string, ReadonlySet<number>>;
   readonly dofsByElement: ReadonlyMap<string, ReadonlySet<number>>;
+  /** World position of each unique mesh node, indexed by global node
+   *  index. Length = nodeCount. Used by the matrix view to map a
+   *  hovered DOF row (= node = floor(dof/2)) back to a canvas
+   *  position for the reverse-direction highlight. */
+  readonly nodePositions: readonly Vec2[];
+  /** For each global node index, the set of element keys
+   *  (`${lineId}|${indexInLine}`) that contain that node. Used to
+   *  highlight elements on the canvas when the user hovers a matrix
+   *  row whose node belongs to several elements (a corner). */
+  readonly elementsByNodeIndex: ReadonlyMap<number, ReadonlySet<string>>;
 }
 
 /**
@@ -77,6 +88,8 @@ export function solve(
         unknownDofs: 0,
         dofsByLineId: new Map(),
         dofsByElement: new Map(),
+        nodePositions: [],
+        elementsByNodeIndex: new Map(),
       };
     }
     return [];
@@ -92,6 +105,7 @@ export function solve(
   // know exactly which slices of the system belong to it.
   const dofsByLineId = new Map<string, Set<number>>();
   const dofsByElement = new Map<string, Set<number>>();
+  const elementsByNodeIndex = new Map<number, Set<string>>();
   for (const el of mesh) {
     const idxs = sys.elementNodeIndex.get(el);
     if (!idxs) continue;
@@ -100,16 +114,27 @@ export function solve(
       lineSet = new Set();
       dofsByLineId.set(el.lineId, lineSet);
     }
+    const elKey = `${el.lineId}|${el.indexInLine}`;
     const elSet = new Set<number>();
-    dofsByElement.set(`${el.lineId}|${el.indexInLine}`, elSet);
+    dofsByElement.set(elKey, elSet);
     for (let k = 0; k < 3; k++) {
       const gi = idxs[k]!;
       lineSet.add(2 * gi);
       lineSet.add(2 * gi + 1);
       elSet.add(2 * gi);
       elSet.add(2 * gi + 1);
+      let nodeSet = elementsByNodeIndex.get(gi);
+      if (!nodeSet) {
+        nodeSet = new Set();
+        elementsByNodeIndex.set(gi, nodeSet);
+      }
+      nodeSet.add(elKey);
     }
   }
+  const nodePositions: Vec2[] = sys.nodesByIndex.map((n) => ({
+    x: n.x,
+    y: n.y,
+  }));
 
   // ── Equation scaling (psi) ────────────────────────────────────────
   // U* ~ 1/G_mod and T* ~ 1/r, so H entries are O(1) while G entries
@@ -174,6 +199,8 @@ export function solve(
         unknownDofs: 0,
         dofsByLineId,
         dofsByElement,
+        nodePositions,
+        elementsByNodeIndex,
       };
     }
     return mesh.map((el) => ({ ...el }));
@@ -198,6 +225,8 @@ export function solve(
       unknownDofs,
       dofsByLineId,
       dofsByElement,
+      nodePositions,
+      elementsByNodeIndex,
     };
   }
 

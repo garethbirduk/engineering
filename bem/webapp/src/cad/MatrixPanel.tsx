@@ -31,12 +31,19 @@ interface MatrixViewProps {
    *  When non-empty, REPLACES the yellow line highlight with orange
    *  so the user sees just the element's scope while hovering. */
   readonly hoveredDofs: ReadonlySet<number>;
+  /** Called when the user hovers the schematic with a specific DOF
+   *  row index (0 .. 2·nodeCount−1), or null when the cursor leaves
+   *  the matrix rows entirely. Used to drive the reverse-direction
+   *  highlight on the main canvas (yellow ring on the corresponding
+   *  node + glow on the elements containing it). */
+  readonly onHoverMatrixDof: (dof: number | null) => void;
 }
 
 export function MatrixView({
   solveStats,
   highlightedDofs,
   hoveredDofs,
+  onHoverMatrixDof,
 }: MatrixViewProps) {
   return (
     <div className="matrix-view" aria-label="System matrix">
@@ -46,6 +53,7 @@ export function MatrixView({
           stats={solveStats}
           highlightedDofs={highlightedDofs}
           hoveredDofs={hoveredDofs}
+          onHoverMatrixDof={onHoverMatrixDof}
         />
       ) : (
         <p className="matrix-view-empty">
@@ -60,10 +68,12 @@ function MatrixSchematic({
   stats,
   highlightedDofs,
   hoveredDofs,
+  onHoverMatrixDof,
 }: {
   readonly stats: SolveStats;
   readonly highlightedDofs: ReadonlySet<number>;
   readonly hoveredDofs: ReadonlySet<number>;
+  readonly onHoverMatrixDof: (dof: number | null) => void;
 }) {
   const N = stats.assemble.nodeCount;
   const size = 2 * N; // matrix side length in DOFs
@@ -124,6 +134,27 @@ function MatrixSchematic({
         role="img"
         aria-label={`Hu = Gt — H and G are ${size}×${size}, u and t are ${size}×1`}
         shapeRendering="crispEdges"
+        onMouseMove={(e) => {
+          // Translate cursor → DOF row via the SVG bounding rect's
+          // vertical fraction inside the matrix band (matY..matY+squareH).
+          // Cursor anywhere outside the band (above the rectangles, or
+          // below them in the u/t label strip) clears the hover.
+          const rect = e.currentTarget.getBoundingClientRect();
+          if (rect.height === 0) return;
+          const yFrac = (e.clientY - rect.top) / rect.height;
+          const yInVB = yFrac * VBH;
+          if (yInVB < matY || yInVB > matY + squareH) {
+            onHoverMatrixDof(null);
+            return;
+          }
+          const rowFrac = (yInVB - matY) / squareH;
+          const dof = Math.max(
+            0,
+            Math.min(size - 1, Math.floor(rowFrac * size)),
+          );
+          onHoverMatrixDof(dof);
+        }}
+        onMouseLeave={() => onHoverMatrixDof(null)}
       >
         {/* H — orange square */}
         <rect
