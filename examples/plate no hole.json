@@ -155,15 +155,15 @@
         "lineId": "6afc4d42-5e0e-49e0-b8eb-7310d735b05e",
         "y": {
           "kind": "traction",
-          "value": 100,
+          "value": 0,
           "prefix": 9
         }
       }
     ],
     "meshing": [
       {
-        "lineId": "564b1915-072e-4567-8b84-74586ec0e43b",
-        "elementsPerLine": 6,
+        "lineId": "8bcdea5f-36ea-4b78-b455-22dddc258abe",
+        "elementsPerLine": 1,
         "localNodes": [
           -1,
           0,
@@ -171,8 +171,8 @@
         ]
       },
       {
-        "lineId": "8bcdea5f-36ea-4b78-b455-22dddc258abe",
-        "elementsPerLine": 6,
+        "lineId": "564b1915-072e-4567-8b84-74586ec0e43b",
+        "elementsPerLine": 1,
         "localNodes": [
           -1,
           0,
@@ -181,22 +181,18 @@
       },
       {
         "lineId": "6f931eb2-982b-4ae2-b05d-153f4d65a5bc",
-        "elementsPerLine": 6,
-        "localNodes": [
-          -1,
-          0,
-          1
-        ]
+        "elementsPerLine": 1
       },
       {
         "lineId": "6afc4d42-5e0e-49e0-b8eb-7310d735b05e",
-        "elementsPerLine": 6,
-        "localNodes": [
-          -1,
-          0,
-          1
-        ]
+        "elementsPerLine": 1
       }
-    ]
+    ],
+    "material": {
+      "E": 207000000000,
+      "nu": 0.3,
+      "planeKind": "stress",
+      "EPrefix": 9
+    }
   }
 }

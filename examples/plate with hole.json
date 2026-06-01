@@ -235,22 +235,6 @@
     ],
     "meshing": [
       {
-        "lineId": "6afc4d42-5e0e-49e0-b8eb-7310d735b05e",
-        "elementsPerLine": 6
-      },
-      {
-        "lineId": "8bcdea5f-36ea-4b78-b455-22dddc258abe",
-        "elementsPerLine": 6
-      },
-      {
-        "lineId": "564b1915-072e-4567-8b84-74586ec0e43b",
-        "elementsPerLine": 6
-      },
-      {
-        "lineId": "6f931eb2-982b-4ae2-b05d-153f4d65a5bc",
-        "elementsPerLine": 6
-      },
-      {
         "lineId": "8bab84a6-f752-4f49-8d95-b64c42a0e93f",
         "elementsPerLine": 3
       },
@@ -264,6 +248,22 @@
       },
       {
         "lineId": "f193d508-8c45-4af0-81c5-57889ed82a1c",
+        "elementsPerLine": 3
+      },
+      {
+        "lineId": "6afc4d42-5e0e-49e0-b8eb-7310d735b05e",
+        "elementsPerLine": 3
+      },
+      {
+        "lineId": "8bcdea5f-36ea-4b78-b455-22dddc258abe",
+        "elementsPerLine": 3
+      },
+      {
+        "lineId": "564b1915-072e-4567-8b84-74586ec0e43b",
+        "elementsPerLine": 3
+      },
+      {
+        "lineId": "6f931eb2-982b-4ae2-b05d-153f4d65a5bc",
         "elementsPerLine": 3
       }
     ]
