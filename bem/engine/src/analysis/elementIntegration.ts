@@ -246,3 +246,184 @@ function integrateWithRule(
 import { shapeFunctionDerivatives } from "../elements/shapeFunctions.js";
 const shapeFunctionDerivativesContinuous = (eta: number) =>
   shapeFunctionDerivatives(eta, ANCHORS);
+
+// ─────────────────────────────────────────────────────────────────────
+// traceCellIntegrand — drill-down view
+// ─────────────────────────────────────────────────────────────────────
+
+/** One cell of the 2×6 H or G block to introspect. */
+export interface CellSelector {
+  readonly kernel: "H" | "G";
+  /** Collocation DOF axis: 0 = x, 1 = y. */
+  readonly row: 0 | 1;
+  /** Element field DOF: col = 2k + β, where k is the local node index
+   *  (0/1/2) and β is the field axis (0 = x, 1 = y). */
+  readonly col: 0 | 1 | 2 | 3 | 4 | 5;
+}
+
+/**
+ * Trace of the scalar integrand behind one cell:
+ *
+ *     f(η)  =  N_k(η) · K_{a,β}(s, x(η), n(η)) · J(η)
+ *     cell  =  ∫_{-1}^{+1}  f(η)  dη
+ *
+ * `etas` / `fs` are an evenly-spaced dense sampling for plotting.
+ * `gauss` is the quadrature actually used by `integrateOverElement`
+ * at the converged adaptive order — expressed in ORIGINAL η space.
+ * `partials[q] = weights[q] · fs[q]` and Σ partials = `cellValue`
+ * (up to the convergence tolerance).
+ *
+ * For singular pairs (when `singularLocalIdx !== null`), `isTelles`
+ * is true and `nodes` are the Telles-transformed η values
+ * (clustered around the singular η̄); `weights` include the Telles
+ * Jacobian so the partials sum correctly in original space.
+ */
+export interface IntegrandTrace {
+  readonly etas: readonly number[];
+  readonly fs: readonly number[];
+  readonly gauss: {
+    readonly nodes: readonly number[];
+    readonly weights: readonly number[];
+    readonly fs: readonly number[];
+    readonly partials: readonly number[];
+    readonly isTelles: boolean;
+    readonly order: number;
+  };
+  readonly cellValue: number;
+}
+
+/**
+ * Sample the integrand of one (kernel, row, col) cell of
+ * `integrateOverElement(s, element, material, singularLocalIdx)` for
+ * plotting. Pure (no caching): cheap enough to call per-hover.
+ *
+ * The adaptive convergence logic is replicated here so the returned
+ * Gauss rule matches what the assembler used at the time the cell
+ * value was produced.
+ */
+export function traceCellIntegrand(
+  s: Vec2,
+  element: MeshElement,
+  material: MaterialProperties,
+  singularLocalIdx: 0 | 1 | 2 | null,
+  cell: CellSelector,
+  samples = 200,
+): IntegrandTrace {
+  const nu = effectiveNu(material);
+  const Gmod = shearModulus(material);
+
+  const isTelles = singularLocalIdx !== null;
+  const buildRule: (n: number) => GaussRule | TellesRule = isTelles
+    ? (n) =>
+        tellesTransform(
+          cachedGaussLegendre(n),
+          element.localNodes[singularLocalIdx!]!,
+        )
+    : (n) => cachedGaussLegendre(n);
+  const nMin = isTelles ? SINGULAR_N_MIN : REGULAR_N_MIN;
+  const nStep = isTelles ? SINGULAR_N_STEP : REGULAR_N_STEP;
+  const nMax = isTelles ? SINGULAR_N_MAX : REGULAR_N_MAX;
+
+  // Walk the adaptive loop, keeping the rule whose blocks satisfy the
+  // convergence test. Mirrors `adaptiveIntegrate` exactly.
+  let prevBlocks: ElementBlocks | null = null;
+  let currBlocks: ElementBlocks = integrateWithRule(
+    s,
+    element,
+    Gmod,
+    nu,
+    buildRule(nMin),
+  );
+  let convergedOrder = nMin;
+  for (let n = nMin + nStep; n <= nMax; n += nStep) {
+    prevBlocks = currBlocks;
+    currBlocks = integrateWithRule(s, element, Gmod, nu, buildRule(n));
+    convergedOrder = n;
+    if (blocksConverged(prevBlocks, currBlocks, CONVERGENCE_TOL)) break;
+  }
+
+  // Pull the converged-order rule (identical to what assembled).
+  const rule = buildRule(convergedOrder);
+
+  // Evaluate the scalar integrand at each Gauss point (in original η)
+  // and at the dense sample points.
+  const gFs: number[] = [];
+  const gPartials: number[] = [];
+  for (let q = 0; q < rule.nodes.length; q++) {
+    const eta = rule.nodes[q]!;
+    const f = evalCellIntegrand(eta, s, element, Gmod, nu, cell);
+    gFs.push(f);
+    gPartials.push(rule.weights[q]! * f);
+  }
+
+  const etas: number[] = [];
+  const fs: number[] = [];
+  for (let i = 0; i < samples; i++) {
+    const eta = -1 + (2 * i) / (samples - 1);
+    etas.push(eta);
+    fs.push(evalCellIntegrand(eta, s, element, Gmod, nu, cell));
+  }
+
+  const cellValue =
+    cell.kernel === "H"
+      ? currBlocks.H[cell.row]![cell.col]!
+      : currBlocks.G[cell.row]![cell.col]!;
+
+  return {
+    etas,
+    fs,
+    gauss: {
+      nodes: rule.nodes,
+      weights: rule.weights,
+      fs: gFs,
+      partials: gPartials,
+      isTelles,
+      order: convergedOrder,
+    },
+    cellValue,
+  };
+}
+
+/** Evaluate the scalar integrand for one (kernel, row, col) cell at
+ *  parametric η on the element. Pure geometry + kernel arithmetic;
+ *  no quadrature involved. */
+function evalCellIntegrand(
+  eta: number,
+  s: Vec2,
+  element: MeshElement,
+  Gmod: number,
+  nu: number,
+  cell: CellSelector,
+): number {
+  const a0 = element.anchors[0];
+  const a1 = element.anchors[1];
+  const a2 = element.anchors[2];
+
+  // Geometry: x(η), J(η), n(η) via the continuous anchor basis.
+  const Ng = shapeFunctions(eta, ANCHORS);
+  const dNg = shapeFunctionDerivativesContinuous(eta);
+  const xField: Vec2 = {
+    x: Ng[0] * a0.x + Ng[1] * a1.x + Ng[2] * a2.x,
+    y: Ng[0] * a0.y + Ng[1] * a1.y + Ng[2] * a2.y,
+  };
+  const dxde_x = dNg[0] * a0.x + dNg[1] * a1.x + dNg[2] * a2.x;
+  const dxde_y = dNg[0] * a0.y + dNg[1] * a1.y + dNg[2] * a2.y;
+  const J = Math.hypot(dxde_x, dxde_y);
+  const n: Vec2 =
+    J > 0 ? { x: dxde_y / J, y: -dxde_x / J } : { x: 0, y: 0 };
+
+  // Field-side shape value on the element's localNodes basis.
+  const Nf = shapeFunctions(eta, element.localNodes);
+
+  // Decompose col into (node k, axis β).
+  const k = (cell.col >> 1) as 0 | 1 | 2;
+  const beta = (cell.col & 1) as 0 | 1;
+
+  const kern = kelvinKernels(s, xField, n, Gmod, nu);
+  const K =
+    cell.kernel === "H"
+      ? kern.T[cell.row]![beta]!
+      : kern.U[cell.row]![beta]!;
+
+  return Nf[k]! * K * J;
+}

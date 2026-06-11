@@ -35,6 +35,7 @@ import {
   interiorDisplacement,
   interiorStress,
   loopOrientation,
+  referenceStress,
   resolveMaterial,
   shapeFunctions,
   shapeFunctionDerivatives,
@@ -49,6 +50,7 @@ import {
 } from "@bem/engine";
 import { Toolbar } from "./Toolbar.js";
 import { InfoPanel } from "./InfoPanel.js";
+import type { EquationsPick } from "./EquationsPanel.js";
 import {
   isPositiveOnlyField,
   ResultsPanel,
@@ -93,6 +95,7 @@ interface ViewBox {
 }
 
 const INITIAL_VIEW: ViewBox = { cx: 0, cy: 0, width: 20, height: 20 };
+const EMPTY_NODE_POSITIONS: readonly Vec2[] = [];
 const MIN_WIDTH = 1e-3;
 const MAX_WIDTH = 1e6;
 const ZOOM_PER_WHEEL_TICK = 1.15;
@@ -239,13 +242,18 @@ function minSqDistToPolygonEdges(p: Vec2, poly: readonly Vec2[]): number {
  *  on a boundary element. Displacement fields are direct shape-function
  *  interpolation of the nodal DOFs; stress fields go through
  *  `boundaryStress` (Kelvin recovery), so we never hit the singular
- *  Somigliana stress integrand on Γ. Derived scalars (σvm, σ1, σ2, τmax)
- *  are simple algebra on the Cartesian stress tensor. */
+ *  Somigliana stress integrand on Γ. Derived scalars (σvm, σ1, σ2, τmax,
+ *  Kt) are simple algebra on the Cartesian stress tensor.
+ *
+ *  `sigmaRef` is the SCF denominator (max applied traction magnitude);
+ *  used only for `field === "scf"`. Caller must pass a positive value
+ *  in that case — caller is responsible for the no-traction-BC guard. */
 function evaluateEdgeField(
   el: MeshElement,
   eta: number,
   field: InteriorField,
   material: MaterialProperties,
+  sigmaRef: number,
 ): number {
   if (field === "ux" || field === "uy") {
     const Nf = shapeFunctions(eta, el.localNodes);
@@ -255,6 +263,19 @@ function evaluateEdgeField(
     return Nf[0] * v0 + Nf[1] * v1 + Nf[2] * v2;
   }
   const s = boundaryStress(el, eta, material);
+  const vmStress = () => {
+    const szz =
+      material.planeKind === "strain"
+        ? material.nu * (s.sxx + s.syy)
+        : 0;
+    return Math.sqrt(
+      0.5 *
+        ((s.sxx - s.syy) ** 2 +
+          (s.syy - szz) ** 2 +
+          (szz - s.sxx) ** 2 +
+          6 * s.sxy * s.sxy),
+    );
+  };
   switch (field) {
     case "sxx":
       return s.sxx;
@@ -268,19 +289,10 @@ function evaluateEdgeField(
       return (s.sxx + s.syy) / 2 + Math.hypot((s.sxx - s.syy) / 2, s.sxy);
     case "s2":
       return (s.sxx + s.syy) / 2 - Math.hypot((s.sxx - s.syy) / 2, s.sxy);
-    case "svm": {
-      const szz =
-        material.planeKind === "strain"
-          ? material.nu * (s.sxx + s.syy)
-          : 0;
-      return Math.sqrt(
-        0.5 *
-          ((s.sxx - s.syy) ** 2 +
-            (s.syy - szz) ** 2 +
-            (szz - s.sxx) ** 2 +
-            6 * s.sxy * s.sxy),
-      );
-    }
+    case "svm":
+      return vmStress();
+    case "scf":
+      return vmStress() / sigmaRef;
   }
 }
 
@@ -342,7 +354,31 @@ export function CadCanvas() {
     interiorField,
     matrixVisible,
     labelsVisible,
+    equationsVisible,
   } = state;
+
+  // Equations panel pick state — just the collocation node now (global
+  // index). Source elements come from the standard line/boundary
+  // selection, so they're driven by the reducer, not a separate pin.
+  // Lives in canvas-local state because the node click bypasses the
+  // selection reducer.
+  const [equationsPick, setEquationsPick] = useState<EquationsPick>({
+    nodeIdx: null,
+  });
+  // Hover preview for a node target in equations mode. Non-node hits
+  // (lines / empty space) fall through to normal selection — no
+  // separate element preview anymore.
+  const [equationsHover, setEquationsHover] = useState<
+    { kind: "node"; nodeIdx: number; pos: Vec2 } | null
+  >(null);
+  // Clear stale picks when the toolbar toggle goes off, or when the
+  // mesh resolves no nodes anymore (cleared model). Wrapped in an
+  // effect so we don't dispatch during render.
+  useEffect(() => {
+    if (!equationsVisible) {
+      setEquationsHover(null);
+    }
+  }, [equationsVisible]);
 
   // Reducer is pure but startDragForHit composes selection + dragSession;
   // we keep a ref to the latest state for use inside refs/handlers that
@@ -375,10 +411,21 @@ export function CadCanvas() {
     | { time: number; clientX: number; clientY: number }
     | null
   >(null);
+  // Slice-mode drag: the start point of the current slice while the
+  // user holds the left button down. Non-null implies "actively
+  // drawing a slice"; mouseup clears it (the committed slice lives in
+  // reducer state). A new mousedown replaces the previous slice
+  // immediately, so the old one disappears the moment the new drag
+  // begins.
+  const sliceDragRef = useRef<Vec2 | null>(null);
 
   const gridStep = gridStepForViewWidth(view.width);
-  const snapRadius = gridStep;
-  const lineTolerance = gridStep * 0.15;
+  // gridStep is now ~viewWidth/60 (4× denser than the old visual). Keep
+  // the click-target size in world units roughly where it used to be by
+  // multiplying through — otherwise users would have to land snaps and
+  // line-hovers inside a target ¼ the previous size.
+  const snapRadius = gridStep * 4;
+  const lineTolerance = gridStep * 0.6;
   const pointsById = useMemo(() => pointMap(model.points), [model.points]);
 
   // Derived mesh — always recomputed (cheap; pure of inputs). Visualisation
@@ -501,6 +548,37 @@ export function CadCanvas() {
     }
     return solveStats.dofsByElement.get(hoveredElementKey) ?? new Set();
   }, [hoveredElementKey, solveStats]);
+
+  // Standard line/boundary/domain selection → set of element keys, used
+  // by the Equations panel to drive per-element submatrices and by the
+  // boundary kernel plot to draw highlight bands. Boundaries expand to
+  // their constituent lines; domains expand to their boundaries' lines.
+  const selectedElementKeys = useMemo<ReadonlySet<string>>(() => {
+    const lineIds = new Set<string>();
+    for (const item of selection) {
+      if (item.kind === "line") {
+        lineIds.add(item.id);
+      } else if (item.kind === "boundary") {
+        const b = model.boundaries.find((bb) => bb.id === item.id);
+        if (b) for (const seg of b.segments) lineIds.add(seg.lineId);
+      } else if (item.kind === "domain") {
+        const d = model.domains.find((dd) => dd.id === item.id);
+        if (d) {
+          for (const bId of d.boundaryIds) {
+            const b = model.boundaries.find((bb) => bb.id === bId);
+            if (b) for (const seg of b.segments) lineIds.add(seg.lineId);
+          }
+        }
+      }
+    }
+    const keys = new Set<string>();
+    for (const el of meshElements) {
+      if (lineIds.has(el.lineId)) {
+        keys.add(`${el.lineId}|${el.indexInLine}`);
+      }
+    }
+    return keys;
+  }, [selection, model.boundaries, model.domains, meshElements]);
 
   // Reverse hover from the matrix view — translates a DOF index to
   // its global node position + the set of elements that contain that
@@ -656,7 +734,74 @@ export function CadCanvas() {
    *  element march all the way across the domain before the opposite
    *  element fired its first ring — waves never met, runaway rings.)
    *
-   *  Filters per candidate:
+  /** Geometry Points whose adjacent BEM elements have a tangent
+   *  discontinuity wider than ~5° — i.e. real corners as opposed to
+   *  smooth meeting Points (like the four arc joins on a hole circle).
+   *  Used by `internalNodes` to push the first-ring offset further from
+   *  corner-adjacent elements (so interior nodes don't land in the
+   *  two-element nearly-singular zone of the Somigliana stress kernels)
+   *  and by `interiorStresses` to choose between boundaryStress (smooth
+   *  side) and a generic boundary-vertex evaluation. */
+  const sharpCorners: readonly Vec2[] = useMemo(() => {
+    if (meshElements.length === 0) return [];
+    const POS_EPS = 1e-6;
+    const ptKey = (x: number, y: number) =>
+      `${Math.round(x / POS_EPS)}|${Math.round(y / POS_EPS)}`;
+    const SHARP_DOT_MAX = -Math.cos((5 * Math.PI) / 180); // ≈ -0.9962
+
+    // Quadratic-element tangent (chord vector in η direction):
+    //   start (η=-1):  -1.5 a0 + 2 a1 - 0.5 a2
+    //   end   (η=+1):   0.5 a0 - 2 a1 + 1.5 a2
+    // We flip the end-tangent so all tangents point *into* the
+    // element interior, away from the touching Point. For a smooth
+    // boundary the two tangents at the meeting Point are antiparallel
+    // (dot ≈ -1); a sharp corner deviates from antiparallel.
+    const incidentTangents = new Map<
+      string,
+      { tx: number; ty: number }[]
+    >();
+    const pushTangent = (k: string, tx: number, ty: number) => {
+      const m = Math.hypot(tx, ty);
+      if (m === 0) return;
+      const t = { tx: tx / m, ty: ty / m };
+      const list = incidentTangents.get(k);
+      if (list) list.push(t);
+      else incidentTangents.set(k, [t]);
+    };
+    for (const el of meshElements) {
+      const a0 = el.anchors[0];
+      const a1 = el.anchors[1];
+      const a2 = el.anchors[2];
+      pushTangent(
+        ptKey(a0.x, a0.y),
+        -1.5 * a0.x + 2 * a1.x - 0.5 * a2.x,
+        -1.5 * a0.y + 2 * a1.y - 0.5 * a2.y,
+      );
+      pushTangent(
+        ptKey(a2.x, a2.y),
+        -(0.5 * a0.x - 2 * a1.x + 1.5 * a2.x),
+        -(0.5 * a0.y - 2 * a1.y + 1.5 * a2.y),
+      );
+    }
+
+    const out: Vec2[] = [];
+    for (const p of model.points) {
+      const tans = incidentTangents.get(ptKey(p.x, p.y));
+      if (!tans || tans.length < 2) continue;
+      let sharp = false;
+      for (let i = 0; i < tans.length && !sharp; i++) {
+        for (let j = i + 1; j < tans.length && !sharp; j++) {
+          const dot =
+            tans[i]!.tx * tans[j]!.tx + tans[i]!.ty * tans[j]!.ty;
+          if (dot > SHARP_DOT_MAX) sharp = true;
+        }
+      }
+      if (sharp) out.push({ x: p.x, y: p.y });
+    }
+    return out;
+  }, [meshElements, model.points]);
+
+  /**  Filters per candidate:
    *    in-domain — inside outer polygon AND outside every hole.
    *    cluster   — at least 0.5 · r_k from any already-accepted point.
    *                Seeds the accepted set with BEM nodes + corner
@@ -672,9 +817,22 @@ export function CadCanvas() {
 
     const ANCHORS = STANDARD_NODES.continuous;
     const FIRST_RING_FACTOR = 0.25;
+    // Elements touching a sharp-tangent geometry Point (e.g. a 90°
+    // corner) get pushed further so first-ring candidates don't land
+    // in the two-element nearly-singular zone of the Somigliana stress
+    // kernels. 0.6 sits well outside the worst-case 1/r² peak from
+    // perpendicular neighbour elements while still giving us a vertex
+    // in the first ring for the contour to interpolate against.
+    const FIRST_RING_FACTOR_AT_CORNER = 0.6;
     const RING_GROWTH = 2.0;
     const CLUSTER_FACTOR = 0.5;
     const MAX_RINGS = 12;
+    const POS_EPS = 1e-6;
+    const ptKey = (x: number, y: number) =>
+      `${Math.round(x / POS_EPS)}|${Math.round(y / POS_EPS)}`;
+    const sharpKeys = new Set(
+      sharpCorners.map((c) => ptKey(c.x, c.y)),
+    );
 
     const isInDomain = (p: Vec2): boolean => {
       if (!pointInPolygon(p, boundaryPolygons.outer)) return false;
@@ -744,13 +902,19 @@ export function CadCanvas() {
           continue;
         }
 
-        const r = FIRST_RING_FACTOR * L * Math.pow(RING_GROWTH, k - 1);
-        const cluster = CLUSTER_FACTOR * r;
-        const cluster2 = cluster * cluster;
-        const pattern = isOdd ? oddEtas(el.localNodes) : evenEtas(el.localNodes);
         const a0 = el.anchors[0];
         const a1 = el.anchors[1];
         const a2 = el.anchors[2];
+        const touchesSharp =
+          sharpKeys.has(ptKey(a0.x, a0.y)) ||
+          sharpKeys.has(ptKey(a2.x, a2.y));
+        const baseFactor = touchesSharp
+          ? FIRST_RING_FACTOR_AT_CORNER
+          : FIRST_RING_FACTOR;
+        const r = baseFactor * L * Math.pow(RING_GROWTH, k - 1);
+        const cluster = CLUSTER_FACTOR * r;
+        const cluster2 = cluster * cluster;
+        const pattern = isOdd ? oddEtas(el.localNodes) : evenEtas(el.localNodes);
 
         let acceptedThisElement = 0;
         for (const eta of pattern) {
@@ -803,29 +967,93 @@ export function CadCanvas() {
 
     // Return only the interior additions (drop the boundary seeds).
     return accepted.slice(seedCount);
-  }, [meshElements, model.points, boundaryPolygons]);
+  }, [meshElements, model.points, boundaryPolygons, sharpCorners]);
 
   /** Delaunay triangulation of (boundary BEM nodes + corner Points +
    *  interior nodes), filtered to keep only triangles whose centroid
    *  lies inside the domain. */
   const internalTriangles = useMemo(() => {
     if (!boundaryPolygons) return null;
-    // Collect all point positions, dedup by quantised key.
+    // Collect all point positions, dedup by quantised key. We also
+    // record which vertices sit on Γ and via which (elementIdx, η)
+    // they can be evaluated — interiorStresses uses that to call
+    // boundaryStress (Kelvin recovery from traction + tangential
+    // strain) instead of the near-singular Somigliana integrand. The
+    // map is keyed by the triangulation vertex index.
     const POS_EPS = 1e-6;
     const ptKey = (x: number, y: number) =>
       `${Math.round(x / POS_EPS)}|${Math.round(y / POS_EPS)}`;
     const indexByKey = new Map<string, number>();
     const pts: Vec2[] = [];
-    const addPt = (p: Vec2) => {
+    const boundaryInfo = new Map<
+      number,
+      { elementIdx: number; eta: number }
+    >();
+    const addPt = (
+      p: Vec2,
+      info?: { elementIdx: number; eta: number },
+    ) => {
       const k = ptKey(p.x, p.y);
-      if (indexByKey.has(k)) return;
-      indexByKey.set(k, pts.length);
+      const existing = indexByKey.get(k);
+      if (existing !== undefined) {
+        // First owner wins. Multiple BEM nodes never coincide under
+        // the discontinuous default, but corner Points may match a
+        // continuous-scheme node at η = ±1 — keep the first mapping.
+        if (info && !boundaryInfo.has(existing)) {
+          boundaryInfo.set(existing, info);
+        }
+        return;
+      }
+      const idx = pts.length;
+      indexByKey.set(k, idx);
       pts.push(p);
+      if (info) boundaryInfo.set(idx, info);
     };
-    for (const el of meshElements) {
-      for (const n of el.nodes) addPt({ x: n.x, y: n.y });
+    for (let ei = 0; ei < meshElements.length; ei++) {
+      const el = meshElements[ei]!;
+      for (let nk = 0; nk < 3; nk++) {
+        const n = el.nodes[nk]!;
+        addPt(
+          { x: n.x, y: n.y },
+          { elementIdx: ei, eta: el.localNodes[nk]! },
+        );
+      }
     }
-    for (const p of model.points) addPt({ x: p.x, y: p.y });
+    // Geometry corner Points. Under the discontinuous scheme these
+    // are NOT BEM nodes; we map each to the η = +1 end of an element
+    // that ends here (or η = -1 of an element that starts here).
+    // boundaryStress evaluated at those η-values gives the recovered
+    // tangential-strain stress at the corner from one side — exactly
+    // what the edge-profile plot already uses.
+    const endAtPoint = new Map<string, number>();
+    const startAtPoint = new Map<string, number>();
+    for (let ei = 0; ei < meshElements.length; ei++) {
+      const el = meshElements[ei]!;
+      endAtPoint.set(
+        ptKey(el.anchors[2].x, el.anchors[2].y),
+        ei,
+      );
+      startAtPoint.set(
+        ptKey(el.anchors[0].x, el.anchors[0].y),
+        ei,
+      );
+    }
+    for (const p of model.points) {
+      const k = ptKey(p.x, p.y);
+      const eiEnd = endAtPoint.get(k);
+      if (eiEnd !== undefined) {
+        addPt({ x: p.x, y: p.y }, { elementIdx: eiEnd, eta: 1 });
+        continue;
+      }
+      const eiStart = startAtPoint.get(k);
+      if (eiStart !== undefined) {
+        addPt({ x: p.x, y: p.y }, { elementIdx: eiStart, eta: -1 });
+        continue;
+      }
+      // Orphan Point not on any boundary element (rare; pre-boundary
+      // sketching state). Add as a plain interior vertex.
+      addPt({ x: p.x, y: p.y });
+    }
     for (const p of internalNodes) addPt(p);
     if (pts.length < 3) return null;
 
@@ -859,7 +1087,7 @@ export function CadCanvas() {
       if (inHole) continue;
       tris.push({ a, b, c });
     }
-    return { points: pts, triangles: tris };
+    return { points: pts, triangles: tris, boundaryInfo };
   }, [meshElements, model.points, internalNodes, boundaryPolygons]);
 
   /** True when the active field needs the full Cartesian stress tensor
@@ -871,7 +1099,8 @@ export function CadCanvas() {
     interiorField === "svm" ||
     interiorField === "s1" ||
     interiorField === "s2" ||
-    interiorField === "tmax";
+    interiorField === "tmax" ||
+    interiorField === "scf";
 
   /** Per-vertex Cartesian stress, lazily evaluated. We only pay the
    *  per-point Somigliana stress integral when a stress-derived field
@@ -880,112 +1109,46 @@ export function CadCanvas() {
    *
    *  Boundary handling: D* ~ 1/r and S* ~ 1/r² blow up when the
    *  evaluation point sits on Γ, so triangulation vertices that
-   *  coincide with a BEM node OR a corner geometry Point would read
-   *  garbage. Those are detected by position-match and their stress is
-   *  REPLACED with the mean of their non-boundary neighbours in the
-   *  triangulation. This is not a true boundary-stress recovery — that
-   *  needs the local tangential strain + applied traction at the
-   *  boundary point — but it keeps the colour scale meaningful (no
-   *  single near-singular value pinning the symmetric range). */
+   *  coincide with a BEM node OR a geometry Point would read garbage
+   *  out of the Somigliana integrand. Those vertices are evaluated
+   *  via `boundaryStress` instead (Kelvin recovery from boundary
+   *  traction + tangential strain — same machinery the edge-profile
+   *  plot uses, no near-singular kernels).
+   *
+   *  Sharp-corner near-singular zone: the first ring of interior
+   *  nodes around a 90° corner would otherwise sit inside the
+   *  combined nearly-singular zone of TWO perpendicular boundary
+   *  elements. `internalNodes` pushes the first ring further out at
+   *  corner-adjacent elements (FIRST_RING_FACTOR_AT_CORNER), so by
+   *  the time we get here the Somigliana evaluation already has
+   *  enough room to be accurate. No post-hoc averaging needed. */
   const interiorStresses: readonly StressTriple[] | null = useMemo(() => {
     if (!stressActive || !internalTriangles || solvedMesh.length === 0) {
       return null;
     }
     const N = internalTriangles.points.length;
-    const POS_EPS = 1e-6;
-    const ptKey = (x: number, y: number) =>
-      `${Math.round(x / POS_EPS)}|${Math.round(y / POS_EPS)}`;
-
-    // Boundary lookup: any BEM mesh node position + any corner geometry
-    // Point position. These vertices live exactly on Γ.
-    const boundaryKeys = new Set<string>();
-    for (const el of solvedMesh) {
-      for (const n of el.nodes) boundaryKeys.add(ptKey(n.x, n.y));
-    }
-    for (const p of model.points) boundaryKeys.add(ptKey(p.x, p.y));
-
-    const isBoundary: boolean[] = new Array(N);
-    for (let i = 0; i < N; i++) {
-      const p = internalTriangles.points[i]!;
-      isBoundary[i] = boundaryKeys.has(ptKey(p.x, p.y));
-    }
-
-    // Pass 1: raw Somigliana stress at every vertex.
-    const raw: StressTriple[] = new Array(N);
-    for (let i = 0; i < N; i++) {
-      raw[i] = interiorStress(
-        internalTriangles.points[i]!,
-        solvedMesh,
-        material,
-      );
-    }
-
-    // Build a vertex-adjacency set from the triangle list.
-    const neighbours: Set<number>[] = Array.from(
-      { length: N },
-      () => new Set<number>(),
-    );
-    for (const t of internalTriangles.triangles) {
-      neighbours[t.a]!.add(t.b);
-      neighbours[t.a]!.add(t.c);
-      neighbours[t.b]!.add(t.a);
-      neighbours[t.b]!.add(t.c);
-      neighbours[t.c]!.add(t.a);
-      neighbours[t.c]!.add(t.b);
-    }
-
-    // Pass 2: replace boundary-vertex stress with mean of non-boundary
-    // neighbours. If a boundary vertex has zero non-boundary neighbours
-    // (rare — happens in very coarse meshes) we fall back to the mean
-    // of ALL neighbours so the contour still has a finite value to
-    // interpolate against.
     const out: StressTriple[] = new Array(N);
     for (let i = 0; i < N; i++) {
-      if (!isBoundary[i]) {
-        out[i] = raw[i]!;
-        continue;
+      const info = internalTriangles.boundaryInfo.get(i);
+      if (info !== undefined) {
+        // On Γ — use the Kelvin boundary recovery for an exact value
+        // (matches the edge-profile plot).
+        out[i] = boundaryStress(
+          solvedMesh[info.elementIdx]!,
+          info.eta,
+          material,
+        );
+      } else {
+        // Interior — Somigliana stress identity.
+        out[i] = interiorStress(
+          internalTriangles.points[i]!,
+          solvedMesh,
+          material,
+        );
       }
-      let sxx = 0;
-      let syy = 0;
-      let sxy = 0;
-      let cnt = 0;
-      for (const j of neighbours[i]!) {
-        if (isBoundary[j]) continue;
-        const r = raw[j]!;
-        if (
-          Number.isFinite(r.sxx) &&
-          Number.isFinite(r.syy) &&
-          Number.isFinite(r.sxy)
-        ) {
-          sxx += r.sxx;
-          syy += r.syy;
-          sxy += r.sxy;
-          cnt++;
-        }
-      }
-      if (cnt === 0) {
-        for (const j of neighbours[i]!) {
-          const r = raw[j]!;
-          if (
-            Number.isFinite(r.sxx) &&
-            Number.isFinite(r.syy) &&
-            Number.isFinite(r.sxy)
-          ) {
-            sxx += r.sxx;
-            syy += r.syy;
-            sxy += r.sxy;
-            cnt++;
-          }
-        }
-      }
-      out[i] =
-        cnt > 0
-          ? { sxx: sxx / cnt, syy: syy / cnt, sxy: sxy / cnt }
-          : { sxx: 0, syy: 0, sxy: 0 };
     }
-
     return out;
-  }, [stressActive, internalTriangles, solvedMesh, material, model.points]);
+  }, [stressActive, internalTriangles, solvedMesh, material]);
 
   /** Active interior field values at every triangulation vertex.
    *  Displacement fields: BEM-node coincident points use the solved
@@ -1041,6 +1204,10 @@ export function CadCanvas() {
     // zero for plane-stress, ν(σxx+σyy) for plane-strain.
     const planeStrain = material.planeKind === "strain";
     const nu = material.nu;
+    // SCF denominator: max applied traction magnitude. Zero ⇒ no
+    // traction BCs ⇒ SCF undefined; we return null below in that case.
+    const sigmaRef = interiorField === "scf" ? referenceStress(model) : 0;
+    if (interiorField === "scf" && sigmaRef === 0) return null;
     const out: number[] = new Array(N);
     for (let i = 0; i < N; i++) {
       const { sxx, syy, sxy } = interiorStresses[i]!;
@@ -1079,69 +1246,52 @@ export function CadCanvas() {
           );
           break;
         }
+        case "scf": {
+          const szz = planeStrain ? nu * (sxx + syy) : 0;
+          const svm = Math.sqrt(
+            0.5 *
+              ((sxx - syy) ** 2 +
+                (syy - szz) ** 2 +
+                (szz - sxx) ** 2 +
+                6 * sxy * sxy),
+          );
+          v = svm / sigmaRef;
+          break;
+        }
         default:
           v = NaN;
       }
       out[i] = Number.isFinite(v) ? v : 0;
     }
     return out;
-  }, [internalTriangles, solvedMesh, interiorField, interiorStresses, material]);
+  }, [internalTriangles, solvedMesh, interiorField, interiorStresses, material, model]);
 
-  /** Actual min, max + a robust symmetric range for the colour scale.
-   *
-   *  Stress-recovery at boundary-adjacent vertices is inherently noisy
-   *  (near-singular kernels even after the neighbour-averaging mask),
-   *  and stress concentrations at holes can spike well above the bulk
-   *  field. Either source would pin `max|v|` and squash the interior
-   *  variation into the central colour band.
-   *
-   *  Instead of using the true max-abs as the colour scale range, we
-   *  use a high-percentile clip (default 95th of |finite values|).
-   *  Outliers above this still render (clipped to the top/bottom
-   *  band) but no longer steal scale resolution from the bulk field.
-   *  Data min / max are still reported underneath the legend so the
-   *  user can see when clipping is happening. */
+  /** Actual min, max + the symmetric range used by the colour scale.
+   *  The range spans the true data extreme so the top/bottom legend
+   *  labels match observed peaks (e.g. Kt ≈ 3 on a plate-with-hole).
+   *  The boundary-vertex neighbour-averaging mask in `interiorStresses`
+   *  already suppresses the near-singular kernel spike that would
+   *  otherwise pin the scale. */
   const interiorFieldStats: FieldStats | null = useMemo(() => {
     if (!interiorFieldValues || interiorFieldValues.length === 0) return null;
     if (interiorField === null) return null;
-    const SCALE_PERCENTILE = 0.95;
     const positive = isPositiveOnlyField(interiorField);
-
-    const finite: number[] = [];
-    for (const v of interiorFieldValues) {
-      if (Number.isFinite(v)) finite.push(v);
-    }
-    if (finite.length === 0) return null;
 
     let min = Infinity;
     let max = -Infinity;
-    for (const v of finite) {
+    let count = 0;
+    for (const v of interiorFieldValues) {
+      if (!Number.isFinite(v)) continue;
       if (v < min) min = v;
       if (v > max) max = v;
+      count++;
     }
+    if (count === 0) return null;
 
     // Range for the colour scale:
-    //   diverging fields → 95th percentile of |v|, symmetric ±range
-    //   positive-only    → 95th percentile of v itself, scale runs 0..range
-    // Outliers above the percentile still render (saturated in the top
-    // band) but no longer pin the scale.
-    let range: number;
-    if (positive) {
-      const posSorted = finite.filter((v) => v >= 0).sort((a, b) => a - b);
-      if (posSorted.length === 0) return null;
-      const pIdx = Math.min(
-        posSorted.length - 1,
-        Math.floor(posSorted.length * SCALE_PERCENTILE),
-      );
-      range = posSorted[pIdx]!;
-    } else {
-      const absSorted = finite.map(Math.abs).sort((a, b) => a - b);
-      const pIdx = Math.min(
-        absSorted.length - 1,
-        Math.floor(absSorted.length * SCALE_PERCENTILE),
-      );
-      range = absSorted[pIdx]!;
-    }
+    //   diverging fields → max(|min|, |max|), symmetric ±range
+    //   positive-only    → max, scale runs 0..range
+    const range = positive ? max : Math.max(Math.abs(min), Math.abs(max));
     if (range === 0) return null;
     return { min, max, range };
   }, [interiorFieldValues, interiorField]);
@@ -1164,6 +1314,10 @@ export function CadCanvas() {
       .filter((s) => s.kind === "line")
       .map((s) => s.id);
     if (selectedLineIds.length === 0) return null;
+
+    // SCF denominator. Zero ⇒ no traction BCs ⇒ SCF undefined.
+    const sigmaRef = interiorField === "scf" ? referenceStress(model) : 0;
+    if (interiorField === "scf" && sigmaRef === 0) return null;
 
     // Index solved mesh elements by line so we can walk them in order.
     const solvedByLine = new Map<string, MeshElement[]>();
@@ -1224,6 +1378,7 @@ export function CadCanvas() {
             eta,
             interiorField,
             material,
+            sigmaRef,
           );
           segCurve.push({ lineId, arc: arcOffset, value });
         }
@@ -1251,6 +1406,7 @@ export function CadCanvas() {
             nodeEta,
             interiorField,
             material,
+            sigmaRef,
           );
           nodes.push({ arc: nodeArc, value, lineId });
         }
@@ -1275,7 +1431,187 @@ export function CadCanvas() {
       nodes,
       segments,
     };
-  }, [selection, interiorField, solvedMesh, material]);
+  }, [selection, interiorField, solvedMesh, material, model]);
+
+  /** Profile of the active interior field along the user's slice
+   *  line. Dense uniform sampling along the parametric line, with
+   *  samples that fall outside the domain (or inside a hole) snapped
+   *  to value = 0. The single curveByLine entry preserves the
+   *  vertical "step to zero" the user expects when the slice crosses
+   *  a hole — interior values plunge to 0 at the hole boundary, sit
+   *  at 0 across the hole, and jump back up on exit. */
+  const sliceProfile: EdgeProfile | null = useMemo(() => {
+    if (!state.slice || !interiorField || solvedMesh.length === 0) return null;
+    if (!boundaryPolygons) return null;
+
+    const start = state.slice.start;
+    const end = state.slice.end;
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const totalArc = Math.hypot(dx, dy);
+    if (totalArc < 1e-12) return null;
+
+    const planeStrain = material.planeKind === "strain";
+    const nu = material.nu;
+    const sigmaRef = interiorField === "scf" ? referenceStress(model) : 0;
+    // SCF with no traction BCs → undefined; bail.
+    if (interiorField === "scf" && sigmaRef === 0) return null;
+
+    const inDomain = (p: Vec2): boolean => {
+      if (!pointInPolygon(p, boundaryPolygons.outer)) return false;
+      for (const h of boundaryPolygons.holes) {
+        if (pointInPolygon(p, h)) return false;
+      }
+      return true;
+    };
+
+    // Reduce a stress triple to the active scalar field.
+    const stressScalar = (s: { sxx: number; syy: number; sxy: number }): number => {
+      switch (interiorField) {
+        case "sxx":
+          return s.sxx;
+        case "syy":
+          return s.syy;
+        case "sxy":
+          return s.sxy;
+        case "tmax":
+          return Math.hypot((s.sxx - s.syy) / 2, s.sxy);
+        case "s1":
+          return (s.sxx + s.syy) / 2 + Math.hypot((s.sxx - s.syy) / 2, s.sxy);
+        case "s2":
+          return (s.sxx + s.syy) / 2 - Math.hypot((s.sxx - s.syy) / 2, s.sxy);
+        case "svm": {
+          const szz = planeStrain ? nu * (s.sxx + s.syy) : 0;
+          return Math.sqrt(
+            0.5 *
+              ((s.sxx - s.syy) ** 2 +
+                (s.syy - szz) ** 2 +
+                (szz - s.sxx) ** 2 +
+                6 * s.sxy * s.sxy),
+          );
+        }
+        case "scf": {
+          const szz = planeStrain ? nu * (s.sxx + s.syy) : 0;
+          const svm = Math.sqrt(
+            0.5 *
+              ((s.sxx - s.syy) ** 2 +
+                (s.syy - szz) ** 2 +
+                (szz - s.sxx) ** 2 +
+                6 * s.sxy * s.sxy),
+          );
+          return svm / sigmaRef;
+        }
+        default:
+          return NaN;
+      }
+    };
+
+    // Near-boundary threshold. Samples within this radius of any BEM
+    // element chord get evaluated via Kelvin boundary recovery
+    // (boundaryStress / shape-function-interp of nodal DOFs) instead
+    // of the nearly-singular Somigliana integrand. Matches the same
+    // mesh-scale heuristic the internalNodes ring-offset uses.
+    let minChord = Infinity;
+    for (const el of solvedMesh) {
+      const a0 = el.anchors[0];
+      const a2 = el.anchors[2];
+      const c = Math.hypot(a2.x - a0.x, a2.y - a0.y);
+      if (c > 0 && c < minChord) minChord = c;
+    }
+    const NEAR_BOUNDARY_FACTOR = 0.25;
+    const nearEps = Number.isFinite(minChord)
+      ? NEAR_BOUNDARY_FACTOR * minChord
+      : 0;
+    const nearEpsSq = nearEps * nearEps;
+
+    /** If `p` is within nearEps of any BEM element chord, return the
+     *  closest element and the chord-projected η. Otherwise null. */
+    const nearestBoundary = (
+      p: Vec2,
+    ): { elementIdx: number; eta: number } | null => {
+      let bestSq = nearEpsSq;
+      let bestIdx = -1;
+      let bestT = 0;
+      for (let ei = 0; ei < solvedMesh.length; ei++) {
+        const el = solvedMesh[ei]!;
+        const a = el.anchors[0];
+        const b = el.anchors[2];
+        const ex = b.x - a.x;
+        const ey = b.y - a.y;
+        const lenSq = ex * ex + ey * ey;
+        if (lenSq === 0) continue;
+        let t = ((p.x - a.x) * ex + (p.y - a.y) * ey) / lenSq;
+        if (t < 0) t = 0;
+        else if (t > 1) t = 1;
+        const cx = a.x + t * ex;
+        const cy = a.y + t * ey;
+        const dx2 = p.x - cx;
+        const dy2 = p.y - cy;
+        const sq = dx2 * dx2 + dy2 * dy2;
+        if (sq < bestSq) {
+          bestSq = sq;
+          bestIdx = ei;
+          bestT = t;
+        }
+      }
+      if (bestIdx < 0) return null;
+      return { elementIdx: bestIdx, eta: -1 + 2 * bestT };
+    };
+
+    const evalAt = (p: Vec2): number => {
+      const nb = nearestBoundary(p);
+      if (interiorField === "ux" || interiorField === "uy") {
+        if (nb) {
+          const el = solvedMesh[nb.elementIdx]!;
+          const Nf = shapeFunctions(nb.eta, el.localNodes);
+          const v0 = interiorField === "ux" ? el.nodes[0].ux : el.nodes[0].uy;
+          const v1 = interiorField === "ux" ? el.nodes[1].ux : el.nodes[1].uy;
+          const v2 = interiorField === "ux" ? el.nodes[2].ux : el.nodes[2].uy;
+          return Nf[0] * v0 + Nf[1] * v1 + Nf[2] * v2;
+        }
+        const u = interiorDisplacement(p, solvedMesh, material);
+        return interiorField === "ux" ? u.x : u.y;
+      }
+      const s = nb
+        ? boundaryStress(solvedMesh[nb.elementIdx]!, nb.eta, material)
+        : interiorStress(p, solvedMesh, material);
+      return stressScalar(s);
+    };
+
+    // 200 samples gives a sharp visual step at hole boundaries (~one
+    // sample wide) without making interiorStress dominate render
+    // time. Scale up if you want finer steps; this is plenty for the
+    // current example sizes.
+    const SAMPLES = 200;
+    const curve: { lineId: string; arc: number; value: number }[] = [];
+    for (let i = 0; i <= SAMPLES; i++) {
+      const t = i / SAMPLES;
+      const arc = t * totalArc;
+      const p: Vec2 = { x: start.x + t * dx, y: start.y + t * dy };
+      const v = inDomain(p) ? evalAt(p) : 0;
+      curve.push({
+        lineId: "slice",
+        arc,
+        value: Number.isFinite(v) ? v : 0,
+      });
+    }
+
+    return {
+      field: interiorField,
+      totalArc,
+      curveByLine: [curve],
+      nodes: [],
+      segments: [
+        {
+          lineId: "slice",
+          startArc: 0,
+          endArc: totalArc,
+          startPoint: start,
+          endPoint: end,
+        },
+      ],
+    };
+  }, [state.slice, interiorField, solvedMesh, material, model, boundaryPolygons]);
 
   /**
    * For every (lineId, indexInLine, nodeIdx) triple, is this node's
@@ -1500,6 +1836,20 @@ export function CadCanvas() {
       }
       if (e.button !== 0) return;
 
+      // Slice mode takes over the left-mouse gesture: mousedown
+      // starts a new slice (replacing any previous one immediately),
+      // mousemove updates the endpoint, mouseup commits.
+      if (stateRef.current.sliceMode) {
+        const start = clientToWorld(svg, view, e.clientX, e.clientY);
+        sliceDragRef.current = start;
+        dispatch({
+          type: "setSlice",
+          slice: { start, end: start },
+        });
+        e.preventDefault();
+        return;
+      }
+
       const now = performance.now();
       const last = lastDownRef.current;
       const isDoubleClick =
@@ -1550,6 +1900,17 @@ export function CadCanvas() {
       setCursorWorld(world);
       setSnap(snapWorld(world, model.points, gridStep, snapRadius));
 
+      // Slice-mode drag: stretch the active slice's endpoint to the
+      // current cursor. Skip everything else (no selection / matrix /
+      // equations hover work fires while drawing a slice).
+      if (sliceDragRef.current !== null) {
+        dispatch({
+          type: "setSlice",
+          slice: { start: sliceDragRef.current, end: world },
+        });
+        return;
+      }
+
       // Mesh-element hover, for the matrix view. We only compute when
       // the matrix view is on (otherwise it's wasted work — no UI
       // consumer). Hit-test against each element's chord; pick the
@@ -1571,6 +1932,36 @@ export function CadCanvas() {
         if (bestKey !== hoveredElementKeyRef.current) {
           hoveredElementKeyRef.current = bestKey;
           setHoveredElementKey(bestKey);
+        }
+      }
+
+      // Equations-mode hover: only previews nearest mesh node within
+      // snap radius. Non-node hits fall through to normal selection,
+      // so the user picks elements via the regular line/boundary
+      // selection mechanism.
+      if (equationsVisible) {
+        const nodePositions = solveStats?.nodePositions ?? [];
+        let bestNodeIdx = -1;
+        let bestNodeSq = snapRadius * snapRadius;
+        for (let i = 0; i < nodePositions.length; i++) {
+          const p = nodePositions[i]!;
+          const dx = world.x - p.x;
+          const dy = world.y - p.y;
+          const sq = dx * dx + dy * dy;
+          if (sq < bestNodeSq) {
+            bestNodeSq = sq;
+            bestNodeIdx = i;
+          }
+        }
+        if (bestNodeIdx >= 0) {
+          const pos = nodePositions[bestNodeIdx]!;
+          setEquationsHover((prev) =>
+            prev && prev.nodeIdx === bestNodeIdx
+              ? prev
+              : { kind: "node", nodeIdx: bestNodeIdx, pos },
+          );
+        } else {
+          setEquationsHover((prev) => (prev === null ? prev : null));
         }
       }
 
@@ -1669,6 +2060,8 @@ export function CadCanvas() {
       matrixVisible,
       meshElements,
       lineTolerance,
+      equationsVisible,
+      solveStats,
     ],
   );
 
@@ -1690,6 +2083,21 @@ export function CadCanvas() {
       const svg = svgRef.current;
       if (!svg) return;
       const cursor = clientToWorld(svg, view, e.clientX, e.clientY);
+
+      // Slice-mode mouseup: keep the slice as-is (it was being kept in
+      // sync on every mousemove). If start == end (no drag — pure
+      // click), drop it; otherwise leave it in place for the Results
+      // panel to plot.
+      if (sliceDragRef.current !== null) {
+        const start = sliceDragRef.current;
+        sliceDragRef.current = null;
+        const dx = cursor.x - start.x;
+        const dy = cursor.y - start.y;
+        if (dx * dx + dy * dy < 1e-12) {
+          dispatch({ type: "setSlice", slice: null });
+        }
+        return;
+      }
 
       // Always end any active drag / commit any new-line draft on mouseup.
       if (stateRef.current.dragSession || stateRef.current.newLineDraft) {
@@ -1723,6 +2131,21 @@ export function CadCanvas() {
       if (wasPanning) return;
       if (down.wasDoubleClick) return; // double-click already processed
 
+      // Equations mode: a plain click on a node-hover target toggles
+      // the collocation pin (re-click → unpin → graphs disappear).
+      // Non-node clicks fall through to normal selection so the user
+      // can pick the line / boundary / domain whose elements the
+      // submatrices should be computed for.
+      if (equationsVisible && equationsHover) {
+        setEquationsPick((prev) => ({
+          nodeIdx:
+            prev.nodeIdx === equationsHover.nodeIdx
+              ? null
+              : equationsHover.nodeIdx,
+        }));
+        return;
+      }
+
       // Simple click: select. Shift = toggle (multi-select); else replace.
       dispatch({
         type: "click",
@@ -1730,12 +2153,13 @@ export function CadCanvas() {
         toggle: down.shift,
       });
     },
-    [view, makeCtx, marquee],
+    [view, makeCtx, marquee, equationsVisible, equationsHover],
   );
 
   const onMouseLeave = useCallback(() => {
     downStateRef.current = null;
     panStateRef.current = null;
+    sliceDragRef.current = null;
     setCursorWorld(null);
     setSnap(null);
     setMarquee(null);
@@ -1745,6 +2169,7 @@ export function CadCanvas() {
       hoveredElementKeyRef.current = null;
       setHoveredElementKey(null);
     }
+    setEquationsHover(null);
     if (stateRef.current.dragSession || stateRef.current.newLineDraft) {
       const cursor = cursorWorld ?? { x: 0, y: 0 };
       dispatch({ type: "endDrag", cursor, ctx: makeCtx(cursor) });
@@ -2044,6 +2469,9 @@ export function CadCanvas() {
         canShowInternalNodes={canShowInternalNodes}
         matrixVisible={matrixVisible}
         labelsVisible={labelsVisible}
+        equationsVisible={equationsVisible}
+        sliceMode={state.sliceMode}
+        canSlice={interiorField !== null && canShowInteriorResults}
         selectionSummary={selectionSummary}
         solveStats={solveStats}
         onCreateDomain={() => dispatch({ type: "createDomainFromSelection" })}
@@ -2053,6 +2481,8 @@ export function CadCanvas() {
         onToggleInternalNodes={() => dispatch({ type: "toggleInternalNodes" })}
         onToggleMatrix={() => dispatch({ type: "toggleMatrix" })}
         onToggleLabels={() => dispatch({ type: "toggleLabels" })}
+        onToggleEquations={() => dispatch({ type: "toggleEquations" })}
+        onToggleSlice={() => dispatch({ type: "toggleSlice" })}
         onSave={handleSave}
         onLoad={handleLoad}
         onNew={handleNew}
@@ -2075,6 +2505,13 @@ export function CadCanvas() {
           matrixHighlightedDofs={matrixHighlightedDofs}
           matrixHoveredDofs={matrixHoveredDofs}
           onHoverMatrixDof={onHoverMatrixDof}
+          equationsVisible={equationsVisible}
+          equationsPick={equationsPick}
+          meshElements={meshElements}
+          material={material}
+          nodePositions={solveStats?.nodePositions ?? EMPTY_NODE_POSITIONS}
+          selectedElementKeys={selectedElementKeys}
+          onClearEquationsPick={() => setEquationsPick({ nodeIdx: null })}
         />
         <div
           className="cad-resizer"
@@ -2942,6 +3379,37 @@ export function CadCanvas() {
                 />
               )}
 
+              {/* Slice line — committed slice + endpoint dots. Rendered
+                  whenever a slice exists, regardless of whether slice
+                  mode is still active, so the line stays visible
+                  alongside the Results plot. */}
+              {state.slice && (
+                <g pointerEvents="none">
+                  <line
+                    x1={state.slice.start.x}
+                    y1={state.slice.start.y}
+                    x2={state.slice.end.x}
+                    y2={state.slice.end.y}
+                    stroke="var(--accent)"
+                    strokeWidth={lineStroke}
+                    strokeDasharray={`${lineStroke * 5} ${lineStroke * 2}`}
+                    opacity={0.85}
+                  />
+                  <circle
+                    cx={state.slice.start.x}
+                    cy={state.slice.start.y}
+                    r={lineStroke * 2.5}
+                    fill="var(--accent)"
+                  />
+                  <circle
+                    cx={state.slice.end.x}
+                    cy={state.slice.end.y}
+                    r={lineStroke * 2.5}
+                    fill="var(--accent)"
+                  />
+                </g>
+              )}
+
               {/* Marquee selection rectangle. */}
               {marquee && (() => {
                 const minX = Math.min(marquee.start.x, marquee.current.x);
@@ -3071,6 +3539,46 @@ export function CadCanvas() {
                   })()}
                 </g>
               )}
+
+              {/* Equations mode: collocation-node pin + hover preview.
+                  Pinned = solid orange ring; previewed = dashed
+                  softer ring. Elements come from the standard line /
+                  boundary selection now, not a separate pin. */}
+              {equationsVisible && (() => {
+                const pinNode =
+                  equationsPick.nodeIdx !== null && solveStats
+                    ? solveStats.nodePositions[equationsPick.nodeIdx] ?? null
+                    : null;
+                const eqOrange = "rgb(249, 115, 22)";
+                const eqOrangeSoft = "rgba(249, 115, 22, 0.45)";
+                const eqOrangeRingFill = "rgba(249, 115, 22, 0.18)";
+                const previewDash = `${view.width * 0.005} ${view.width * 0.003}`;
+                return (
+                  <g pointerEvents="none">
+                    {pinNode && (
+                      <circle
+                        cx={pinNode.x}
+                        cy={pinNode.y}
+                        r={view.width * 0.014}
+                        fill={eqOrangeRingFill}
+                        stroke={eqOrange}
+                        strokeWidth={view.width * 0.0028}
+                      />
+                    )}
+                    {equationsHover && (
+                      <circle
+                        cx={equationsHover.pos.x}
+                        cy={equationsHover.pos.y}
+                        r={view.width * 0.018}
+                        fill="none"
+                        stroke={eqOrangeSoft}
+                        strokeWidth={view.width * 0.0024}
+                        strokeDasharray={previewDash}
+                      />
+                    )}
+                  </g>
+                );
+              })()}
             </g>
           </svg>
           <div className="cad-canvas-status">{statusBits.join("  ·  ")}</div>
@@ -3086,7 +3594,11 @@ export function CadCanvas() {
           activeField={interiorField}
           stats={interiorFieldStats}
           canShowResults={canShowInteriorResults}
-          edgeProfile={edgeProfile}
+          // Slice profile takes precedence over the boundary-line edge
+          // profile so a committed slice immediately replaces whatever
+          // was plotted from the selected lines.
+          edgeProfile={sliceProfile ?? edgeProfile}
+          isSlice={sliceProfile !== null}
           onSelectField={(field) =>
             dispatch({ type: "setInteriorField", field })
           }

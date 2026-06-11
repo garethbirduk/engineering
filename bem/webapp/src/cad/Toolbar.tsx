@@ -16,6 +16,9 @@ interface ToolbarProps {
   readonly canShowInternalNodes: boolean;
   readonly matrixVisible: boolean;
   readonly labelsVisible: boolean;
+  readonly equationsVisible: boolean;
+  readonly sliceMode: boolean;
+  readonly canSlice: boolean;
   readonly selectionSummary: string;
   readonly solveStats: SolveStats | null;
   readonly onCreateDomain: () => void;
@@ -25,6 +28,8 @@ interface ToolbarProps {
   readonly onToggleInternalNodes: () => void;
   readonly onToggleMatrix: () => void;
   readonly onToggleLabels: () => void;
+  readonly onToggleEquations: () => void;
+  readonly onToggleSlice: () => void;
   readonly onSave: () => void;
   readonly onLoad: () => void;
   readonly onNew: () => void;
@@ -87,6 +92,9 @@ export function Toolbar({
   canShowInternalNodes,
   matrixVisible,
   labelsVisible,
+  equationsVisible,
+  sliceMode,
+  canSlice,
   selectionSummary,
   solveStats,
   onCreateDomain,
@@ -96,6 +104,8 @@ export function Toolbar({
   onToggleInternalNodes,
   onToggleMatrix,
   onToggleLabels,
+  onToggleEquations,
+  onToggleSlice,
   onSave,
   onLoad,
   onNew,
@@ -184,6 +194,29 @@ export function Toolbar({
         title="Show / hide D/B/L/E element address labels + local node numbers"
       >
         Labels
+      </button>
+      <button
+        type="button"
+        className={`cad-tool ${equationsVisible ? "cad-tool--active" : ""}`}
+        onClick={onToggleEquations}
+        aria-pressed={equationsVisible}
+        title="Pick a collocation node + a source element to see the 2×6 H and G submatrices"
+      >
+        Equations
+      </button>
+      <button
+        type="button"
+        className={`cad-tool ${sliceMode ? "cad-tool--active" : ""}`}
+        onClick={onToggleSlice}
+        aria-pressed={sliceMode}
+        disabled={!canSlice}
+        title={
+          canSlice
+            ? "Drag a slice line across the domain — the active field is plotted along it in the Results panel"
+            : "Pick a field in the Results panel to enable slicing"
+        }
+      >
+        Slice
       </button>
       <div className="cad-toolgroup-sep" aria-hidden="true" />
       <div className="cad-toolgroup" aria-label="File">

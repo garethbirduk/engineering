@@ -280,7 +280,11 @@ body,
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: hidden;
+  /* Vertical scroll when the inspector's content overflows the panel
+     height (e.g. on window resize). Native scrollbar handles wheel,
+     keyboard PageUp/Down, and middle-click drag for free. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .matrix-view {
@@ -345,7 +349,10 @@ body,
   display: flex;
   flex-direction: column;
   min-height: 0;
-  overflow: hidden;
+  /* Vertical scroll when contour scale + edge-profile plot together
+     exceed the panel height. Wheel works natively. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 0.6rem 0.9rem 0.9rem;
   gap: 0.8rem;
 }
@@ -430,16 +437,24 @@ body,
 .results-scale-labels {
   grid-row: 1;
   grid-column: 2;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
+  position: relative;
   font-size: 0.78rem;
   font-variant-numeric: tabular-nums;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 }
 
+/* Labels are placed absolutely at their band-edge percentage. The
+   translateY(-50%) centres the text on the actual band boundary in
+   the colour bar (so the topmost label centres on the bar's top edge
+   = data max, the bottom on the bar's bottom edge = data min / 0).
+   Slight horizontal padding away from the bar; line-height: 1 keeps
+   visual centre = baseline centre. */
 .results-scale-label {
+  position: absolute;
+  left: 0;
   line-height: 1;
+  transform: translateY(-50%);
+  white-space: nowrap;
 }
 
 .results-scale-meta {
@@ -721,6 +736,38 @@ body,
 .cad-bc-reset:hover {
   opacity: 1;
   background: color-mix(in srgb, currentColor 8%, canvas);
+}
+
+.cad-eq-table {
+  border-collapse: collapse;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.78rem;
+}
+.cad-eq-table th,
+.cad-eq-table td {
+  padding: 0.2rem 0.45rem;
+  border: 1px solid color-mix(in srgb, currentColor 15%, transparent);
+  text-align: right;
+  white-space: nowrap;
+}
+.cad-eq-table th {
+  background: color-mix(in srgb, currentColor 6%, canvas);
+  font-weight: 600;
+}
+.cad-eq-table tbody th {
+  text-align: left;
+}
+.cad-eq-cell {
+  cursor: pointer;
+  transition: background 0.1s ease-out;
+}
+.cad-eq-cell:hover {
+  background: color-mix(in srgb, rgb(249, 115, 22) 12%, canvas);
+}
+.cad-eq-cell--selected {
+  background: color-mix(in srgb, rgb(249, 115, 22) 28%, canvas);
+  outline: 1px solid rgb(249, 115, 22);
+  outline-offset: -1px;
 }
 
 .cad-mesh-row {

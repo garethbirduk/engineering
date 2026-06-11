@@ -11,10 +11,13 @@ import type {
   Id,
   LineDiscretisation,
   MaterialProperties,
+  MeshElement,
   SolveStats,
+  Vec2,
 } from "@bem/engine";
 import { resolveMaterial, shapeFunctions } from "@bem/engine";
 import { MatrixView } from "./MatrixPanel.js";
+import { EquationsPanel, type EquationsPick } from "./EquationsPanel.js";
 import {
   DEFAULT_ELEMENTS_PER_LINE,
   DEFAULT_LOCAL_NODES,
@@ -63,6 +66,17 @@ interface InfoPanelProps {
     row: number | null,
     col: number | null,
   ) => void;
+  /** Whether the Equations sub-panel is visible (toolbar toggle). When
+   *  true, render the EquationsPanel above (or below) the Matrix view
+   *  showing the 2×6 H and G submatrices for the picked
+   *  (collocation node, source element) pair. */
+  readonly equationsVisible: boolean;
+  readonly equationsPick: EquationsPick;
+  readonly meshElements: readonly MeshElement[];
+  readonly material: MaterialProperties;
+  readonly nodePositions: readonly Vec2[];
+  readonly selectedElementKeys: ReadonlySet<string>;
+  readonly onClearEquationsPick: () => void;
 }
 
 export function InfoPanel({
@@ -74,6 +88,13 @@ export function InfoPanel({
   matrixHighlightedDofs,
   matrixHoveredDofs,
   onHoverMatrixDof,
+  equationsVisible,
+  equationsPick,
+  meshElements,
+  material,
+  nodePositions,
+  selectedElementKeys,
+  onClearEquationsPick,
 }: InfoPanelProps) {
   return (
     <aside className="cad-info" aria-label="Inspector">
@@ -87,6 +108,17 @@ export function InfoPanel({
             highlightedDofs={matrixHighlightedDofs}
             hoveredDofs={matrixHoveredDofs}
             onHoverMatrixDof={onHoverMatrixDof}
+          />
+        )}
+        {equationsVisible && (
+          <EquationsPanel
+            pick={equationsPick}
+            nodePositions={nodePositions}
+            meshElements={meshElements}
+            boundaries={model.boundaries}
+            material={material}
+            selectedElementKeys={selectedElementKeys}
+            onClear={onClearEquationsPick}
           />
         )}
         {renderBody(model, selection, onDispatch)}

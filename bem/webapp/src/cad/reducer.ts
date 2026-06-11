@@ -91,7 +91,7 @@ export interface CanvasState {
    *  - Displacement: ux, uy
    *  - Cartesian stress: sxx, syy, sxy
    *  - Derived stress scalars: svm (von Mises), s1, s2 (principals),
-   *    tmax (max in-plane shear) */
+   *    tmax (max in-plane shear), scf (Kt = σvm / σref) */
   readonly interiorField:
     | "ux"
     | "uy"
@@ -102,6 +102,7 @@ export interface CanvasState {
     | "s1"
     | "s2"
     | "tmax"
+    | "scf"
     | null;
   /** Whether the matrix-visualisation panel (between the Inspector and
    *  the canvas) is shown. Lets the user see the H·u = G·t schematic
@@ -112,6 +113,21 @@ export interface CanvasState {
    *  node index (1, 2, 3) inside each node circle. Useful for
    *  diagnosing boundary-traversal order and indexing bugs. */
   readonly labelsVisible: boolean;
+  /** When on, canvas enters a 2-click pick mode (collocation node +
+   *  source element) and the Inspector renders the per-pair 2×6 H and
+   *  G submatrices. Click snaps to whichever target (mesh node or
+   *  mesh element chord) is closer to the cursor. */
+  readonly equationsVisible: boolean;
+  /** When true, the canvas is in "slice" mode: click-drag draws a
+   *  temporary cutting line across the domain. The currently-selected
+   *  interior field is plotted along the slice in the Results panel
+   *  (replacing the boundary-line edge profile). A new mousedown
+   *  replaces any existing slice. Esc / toggling the button off
+   *  clears the slice. */
+  readonly sliceMode: boolean;
+  /** The active slice line (world coords) — null until the user
+   *  finishes a drag in slice mode, then holds the latest one. */
+  readonly slice: { readonly start: Vec2; readonly end: Vec2 } | null;
 }
 
 /** Geometric parameters needed to interpret a click/double-click. */
@@ -176,6 +192,12 @@ export type CanvasAction =
   | { readonly type: "toggleInternalNodes" }
   | { readonly type: "toggleMatrix" }
   | { readonly type: "toggleLabels" }
+  | { readonly type: "toggleEquations" }
+  | { readonly type: "toggleSlice" }
+  | {
+      readonly type: "setSlice";
+      readonly slice: { readonly start: Vec2; readonly end: Vec2 } | null;
+    }
   | {
       readonly type: "setInteriorField";
       readonly field: CanvasState["interiorField"];
@@ -196,6 +218,9 @@ export const INITIAL_STATE: CanvasState = {
   interiorField: null,
   matrixVisible: false,
   labelsVisible: false,
+  equationsVisible: false,
+  sliceMode: false,
+  slice: null,
 };
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -287,6 +312,21 @@ export function canvasReducer(
     case "toggleLabels":
       return { ...state, labelsVisible: !state.labelsVisible };
 
+    case "toggleEquations":
+      return { ...state, equationsVisible: !state.equationsVisible };
+
+    case "toggleSlice":
+      // Turning slice mode off clears any in-flight slice — otherwise
+      // it'd linger in the Results panel with no way to remove it.
+      return {
+        ...state,
+        sliceMode: !state.sliceMode,
+        slice: state.sliceMode ? null : state.slice,
+      };
+
+    case "setSlice":
+      return { ...state, slice: action.slice };
+
     case "setInteriorField":
       return { ...state, interiorField: action.field };
 
@@ -300,7 +340,8 @@ export function canvasReducer(
       if (
         state.selection.length === 0 &&
         state.dragSession === null &&
-        state.newLineDraft === null
+        state.newLineDraft === null &&
+        state.slice === null
       ) {
         return state;
       }
@@ -309,6 +350,7 @@ export function canvasReducer(
         selection: [],
         dragSession: null,
         newLineDraft: null,
+        slice: null,
       };
   }
 }

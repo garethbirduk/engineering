@@ -9,6 +9,7 @@
 // at every triangulation vertex; derived stress scalars (σvm, σ1, σ2,
 // τmax) — algebra on the Cartesian components, evaluated per vertex.
 
+import { useMemo, useRef, useState } from "react";
 import {
   bandEdgeValues,
   bandEdgeValuesSequential,
@@ -27,13 +28,14 @@ export type InteriorField =
   | "svm"
   | "s1"
   | "s2"
-  | "tmax";
+  | "tmax"
+  | "scf";
 
 /** Fields that are ≥ 0 by definition (sums-of-squares, magnitudes).
  *  These use a sequential 0→max colour scale instead of the diverging
  *  ±range scale used for fields that can swing either way. */
 export function isPositiveOnlyField(field: InteriorField): boolean {
-  return field === "svm" || field === "tmax";
+  return field === "svm" || field === "tmax" || field === "scf";
 }
 
 export interface FieldStats {
@@ -108,6 +110,12 @@ const GROUPS: readonly FieldGroup[] = [
       { id: "s1", label: "σ1", tooltip: "Major principal stress" },
       { id: "s2", label: "σ2", tooltip: "Minor principal stress" },
       { id: "tmax", label: "τmax", tooltip: "Max in-plane shear" },
+      {
+        id: "scf",
+        label: "Kt",
+        tooltip:
+          "Stress concentration factor: σvm / σref, where σref = max |applied traction| across BCs",
+      },
     ],
   },
 ];
@@ -120,10 +128,14 @@ interface ResultsPanelProps {
   /** True when results CAN be shown (solve produced output and the
    *  triangulation exists). When false, all field buttons are disabled. */
   readonly canShowResults: boolean;
-  /** Profile of the active field along selected boundary line(s). Null
-   *  when nothing's selected, no field is active, or the solver hasn't
-   *  produced output. */
+  /** Profile of the active field along the source the user picked:
+   *  one or more selected boundary lines (default) or a slice line
+   *  drawn across the domain (when slice mode supplies one). Null
+   *  when nothing's selected or sliced. */
   readonly edgeProfile: EdgeProfile | null;
+  /** True when `edgeProfile` came from the slice tool — changes the
+   *  section label so the user can tell which source is plotted. */
+  readonly isSlice?: boolean;
   /** Click handler. Pass the same field again to toggle off. */
   readonly onSelectField: (field: InteriorField | null) => void;
 }
@@ -139,6 +151,7 @@ export function ResultsPanel({
   stats,
   canShowResults,
   edgeProfile,
+  isSlice = false,
   onSelectField,
 }: ResultsPanelProps) {
   const activeLabel = (() => {
@@ -201,15 +214,16 @@ export function ResultsPanel({
       {activeField && (
         <div className="results-section">
           <div className="results-section-label">
-            Along selected edge{edgeProfile && edgeProfile.segments.length > 1 ? "s" : ""}{" "}
-            ({activeLabel})
+            {isSlice
+              ? `Along slice (${activeLabel})`
+              : `Along selected edge${edgeProfile && edgeProfile.segments.length > 1 ? "s" : ""} (${activeLabel})`}
           </div>
           {edgeProfile ? (
             <EdgeProfilePlot profile={edgeProfile} />
           ) : (
             <div className="results-hint">
-              Select one or more boundary lines to plot {activeLabel} along
-              their arc length.
+              Select one or more boundary lines (or draw a slice in Slice
+              mode) to plot {activeLabel} along arc length.
             </div>
           )}
         </div>
@@ -219,36 +233,43 @@ export function ResultsPanel({
 }
 
 function EdgeProfilePlot({ profile }: { readonly profile: EdgeProfile }) {
-  // Data range — auto-fit, with a small symmetric pad so the curve
-  // doesn't hug the top/bottom edges.
-  let dMin = Infinity;
-  let dMax = -Infinity;
+  const svgRef = useRef<SVGSVGElement>(null);
+  const [hoverArc, setHoverArc] = useState<number | null>(null);
+
+  // True data extremes (unpadded) — what the tick labels report so
+  // the values read out of the plot match the contour's data max/min.
+  let dataMin = Infinity;
+  let dataMax = -Infinity;
   for (const line of profile.curveByLine) {
     for (const p of line) {
       if (Number.isFinite(p.value)) {
-        if (p.value < dMin) dMin = p.value;
-        if (p.value > dMax) dMax = p.value;
+        if (p.value < dataMin) dataMin = p.value;
+        if (p.value > dataMax) dataMax = p.value;
       }
     }
   }
   for (const n of profile.nodes) {
     if (Number.isFinite(n.value)) {
-      if (n.value < dMin) dMin = n.value;
-      if (n.value > dMax) dMax = n.value;
+      if (n.value < dataMin) dataMin = n.value;
+      if (n.value > dataMax) dataMax = n.value;
     }
   }
-  if (!Number.isFinite(dMin) || !Number.isFinite(dMax)) {
+  if (!Number.isFinite(dataMin) || !Number.isFinite(dataMax)) {
     return <div className="results-hint">No samples yet.</div>;
   }
-  if (dMin === dMax) {
-    // Pad a constant field so it doesn't degenerate to a single line.
-    const pad = Math.abs(dMin) > 0 ? Math.abs(dMin) * 0.1 : 1;
-    dMin -= pad;
-    dMax += pad;
+  // Axis range — small symmetric pad so the curve doesn't hug the
+  // top/bottom edges. Padded range is only used for pixel mapping;
+  // tick labels still report the true dataMin/dataMax.
+  let dMin: number;
+  let dMax: number;
+  if (dataMin === dataMax) {
+    const pad = Math.abs(dataMin) > 0 ? Math.abs(dataMin) * 0.1 : 1;
+    dMin = dataMin - pad;
+    dMax = dataMax + pad;
   } else {
-    const pad = (dMax - dMin) * 0.08;
-    dMin -= pad;
-    dMax += pad;
+    const pad = (dataMax - dataMin) * 0.08;
+    dMin = dataMin - pad;
+    dMax = dataMax + pad;
   }
 
   const W = 260;
@@ -264,22 +285,89 @@ function EdgeProfilePlot({ profile }: { readonly profile: EdgeProfile }) {
   const xPx = (x: number) => padL + ((x - xMin) / (xMax - xMin)) * innerW;
   const yPx = (y: number) => padT + ((dMax - y) / (dMax - dMin)) * innerH;
 
-  // y-axis tick values: min, mid, max plus 0 if it lies within range.
-  const yTicks: number[] = [dMin, dMax];
-  const mid = (dMin + dMax) / 2;
+  // Flat list of all curve samples, ordered by global arc length.
+  // Used by the crosshair to snap to the nearest curve point under
+  // the cursor's x position.
+  const flatSamples = useMemo(() => {
+    const out: { arc: number; value: number; lineId: string }[] = [];
+    for (const line of profile.curveByLine) {
+      for (const p of line) {
+        if (Number.isFinite(p.value)) {
+          out.push({ arc: p.arc, value: p.value, lineId: p.lineId });
+        }
+      }
+    }
+    return out;
+  }, [profile]);
+
+  // Snap the hovered arc to the nearest curve sample so the readout
+  // value is exactly what the BEM solver produced (no interpolation
+  // artefacts in the crosshair label).
+  const hover = (() => {
+    if (hoverArc === null || flatSamples.length === 0) return null;
+    let best = flatSamples[0]!;
+    let bestD = Math.abs(best.arc - hoverArc);
+    for (let i = 1; i < flatSamples.length; i++) {
+      const s = flatSamples[i]!;
+      const d = Math.abs(s.arc - hoverArc);
+      if (d < bestD) {
+        best = s;
+        bestD = d;
+      }
+    }
+    return best;
+  })();
+
+  const onMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const rect = svg.getBoundingClientRect();
+    // Convert client px → viewBox units (the SVG scales with
+    // preserveAspectRatio="xMidYMid meet" so the displayed box may
+    // not match the rect 1:1 in either dimension; use the smaller
+    // scale axis to be safe).
+    const sx = rect.width / W;
+    const sy = rect.height / H;
+    const s = Math.min(sx, sy);
+    const offX = (rect.width - W * s) / 2;
+    const offY = (rect.height - H * s) / 2;
+    const xVB = (e.clientX - rect.left - offX) / s;
+    const yVB = (e.clientY - rect.top - offY) / s;
+    if (
+      xVB < padL ||
+      xVB > W - padR ||
+      yVB < padT ||
+      yVB > H - padB
+    ) {
+      setHoverArc(null);
+      return;
+    }
+    const arc = xMin + ((xVB - padL) / innerW) * (xMax - xMin);
+    setHoverArc(arc);
+  };
+  const onMouseLeave = () => setHoverArc(null);
+
+  // y-axis tick values: true data min/max, mid of the data range,
+  // plus 0 if it lies within range. Reporting unpadded values means
+  // the visible max/min on the plot matches the contour's data max/min.
+  const yTicks: number[] = [dataMin, dataMax];
+  const mid = (dataMin + dataMax) / 2;
   yTicks.push(mid);
-  if (dMin < 0 && dMax > 0) yTicks.push(0);
+  if (dataMin < 0 && dataMax > 0) yTicks.push(0);
   yTicks.sort((a, b) => a - b);
 
   // y = 0 axis if it crosses the plot.
-  const showZero = dMin < 0 && dMax > 0;
+  const showZero = dataMin < 0 && dataMax > 0;
 
   return (
     <svg
+      ref={svgRef}
       viewBox={`0 0 ${W} ${H}`}
       preserveAspectRatio="xMidYMid meet"
       className="results-edge-plot"
       aria-label={`${profile.field} along selected edges`}
+      onMouseMove={onMouseMove}
+      onMouseLeave={onMouseLeave}
     >
       {/* axes */}
       <line
@@ -423,6 +511,78 @@ function EdgeProfilePlot({ profile }: { readonly profile: EdgeProfile }) {
       >
         arc length
       </text>
+      {/* crosshair — vertical + horizontal dashed lines through the
+          snapped curve sample, with a (arc, value) readout above the
+          intersection. Clamps the readout box to the plot area so it
+          stays visible at all hover positions. */}
+      {hover && (() => {
+        const cx = xPx(hover.arc);
+        const cy = yPx(hover.value);
+        const label = `${hover.arc.toPrecision(3)}, ${fmtSci(hover.value)}`;
+        const charW = 5.4;
+        const boxW = label.length * charW + 8;
+        const boxH = 14;
+        // Default: above and slightly right of the dot. Flip below
+        // when near the top of the plot, clamp horizontally.
+        let bx = cx + 6;
+        let by = cy - boxH - 6;
+        if (by < padT) by = cy + 6;
+        if (bx + boxW > W - padR) bx = cx - boxW - 6;
+        if (bx < padL) bx = padL;
+        return (
+          <g pointerEvents="none">
+            <line
+              x1={cx}
+              y1={padT}
+              x2={cx}
+              y2={H - padB}
+              stroke="currentColor"
+              strokeWidth={0.6}
+              opacity={0.5}
+              strokeDasharray="3 3"
+            />
+            <line
+              x1={padL}
+              y1={cy}
+              x2={W - padR}
+              y2={cy}
+              stroke="currentColor"
+              strokeWidth={0.6}
+              opacity={0.5}
+              strokeDasharray="3 3"
+            />
+            <circle
+              cx={cx}
+              cy={cy}
+              r={3}
+              fill="var(--accent)"
+              stroke="canvas"
+              strokeWidth={1}
+            />
+            <rect
+              x={bx}
+              y={by}
+              width={boxW}
+              height={boxH}
+              rx={2}
+              ry={2}
+              fill="canvas"
+              stroke="currentColor"
+              strokeOpacity={0.5}
+              strokeWidth={0.6}
+            />
+            <text
+              x={bx + 4}
+              y={by + 10}
+              fontSize="9"
+              fill="currentColor"
+              fontFamily="ui-monospace, SFMono-Regular, Menlo, Consolas, monospace"
+            >
+              {label}
+            </text>
+          </g>
+        );
+      })()}
     </svg>
   );
 }
@@ -454,11 +614,23 @@ function ScaleLegend({
         aria-hidden="true"
       />
       <div className="results-scale-labels">
-        {edges.map((v, i) => (
-          <span key={i} className="results-scale-label">
-            {fmtSci(v)}
-          </span>
-        ))}
+        {edges.map((v, i) => {
+          // Each label sits at its band edge in the colour bar.
+          // edges[0] = top edge of top band (data-side max);
+          // edges[N] = bottom edge of bottom band (data-side min or 0).
+          // Both extremes are explicit; intermediate labels mark every
+          // band transition.
+          const top = (i / (edges.length - 1)) * 100;
+          return (
+            <span
+              key={i}
+              className="results-scale-label"
+              style={{ top: `${top}%` }}
+            >
+              {fmtSci(v)}
+            </span>
+          );
+        })}
       </div>
       <div className="results-scale-meta">
         <div>
