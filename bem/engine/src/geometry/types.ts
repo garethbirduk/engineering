@@ -57,12 +57,28 @@ export interface Boundary {
   readonly segments: readonly BoundarySegment[];
 }
 
-/** A Domain is an ordered list of Boundaries. */
+/** A Domain is an ordered list of Boundaries plus an optional
+ *  material override. When `material` is unset the Domain inherits
+ *  `CadModel.material` (or DEFAULT_MATERIAL when that's also unset).
+ *  Per-Domain material lets a single model carry multiple zones with
+ *  different elastic properties. */
 export interface Domain {
   readonly id: Id;
   readonly name: string;
   readonly boundaryIds: readonly Id[];
+  readonly material?: MaterialPropertiesRef;
 }
+
+/** Forward-declared structural reference to MaterialProperties so the
+ *  geometry types file doesn't import from analysis. The concrete type
+ *  is `MaterialProperties` from ../material.ts; this alias keeps the
+ *  import cycle at bay. */
+export type MaterialPropertiesRef = {
+  readonly E: number;
+  readonly nu: number;
+  readonly planeKind: "strain" | "stress";
+  readonly EPrefix?: number;
+};
 
 // ── boundary conditions ──────────────────────────────────────────────────
 

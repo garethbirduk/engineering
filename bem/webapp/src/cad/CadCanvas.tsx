@@ -30,6 +30,7 @@ import {
   arcPoint,
   arcSvgPathD,
   boundaryStress,
+  buildLineDomainMap,
   createBlockCache,
   discretiseLines,
   interiorDisplacement,
@@ -501,34 +502,102 @@ export function CadCanvas() {
   const stableSolveStatsRef = useRef<SolveStats | null>(null);
   const solvedMesh = useMemo(() => {
     solveStatsRef.current = {};
-    const result = solve(
-      meshElements,
-      material,
-      blockCacheRef.current,
-      solveStatsRef.current,
-    );
+    // Multi-zone: partition elements by Domain via the line → domain
+    // map, solve each Domain independently with its own material, and
+    // concatenate. Lines not belonging to any Domain (loose sketch
+    // geometry) go through a final "default" solve with the model
+    // material.
+    const { lineDomainId, domainMaterial } = buildLineDomainMap(model);
+    const elementsByDomain = new Map<string, MeshElement[]>();
+    const loose: MeshElement[] = [];
+    for (const el of meshElements) {
+      const dId = lineDomainId.get(el.lineId);
+      if (dId === undefined) {
+        loose.push(el);
+        continue;
+      }
+      const arr = elementsByDomain.get(dId);
+      if (arr) arr.push(el);
+      else elementsByDomain.set(dId, [el]);
+    }
+
+    const out: MeshElement[] = [];
+    const aggStats: { value?: SolveStats } = {};
+    // Mutable working accumulators (SolveStats fields are readonly,
+    // so we collect into local mutables and snapshot at the end).
+    let asmHits = 0;
+    let asmMisses = 0;
+    let asmGaussEvals = 0;
+    let asmNodeCount = 0;
+    let asmElementCount = 0;
+    let unknownDofs = 0;
+    const dofsByLineId = new Map<string, ReadonlySet<number>>();
+    const dofsByElement = new Map<string, ReadonlySet<number>>();
+    const nodePositions: Vec2[] = [];
+    const elementsByNodeIndex = new Map<number, ReadonlySet<string>>();
+    let mergedAny = false;
+    const mergeStats = (s: SolveStats | undefined) => {
+      if (!s) return;
+      asmHits += s.assemble.hits;
+      asmMisses += s.assemble.misses;
+      asmGaussEvals += s.assemble.gaussEvals;
+      asmNodeCount += s.assemble.nodeCount;
+      asmElementCount += s.assemble.elementCount;
+      unknownDofs += s.unknownDofs;
+      for (const [k, v] of s.dofsByLineId) dofsByLineId.set(k, v);
+      for (const [k, v] of s.dofsByElement) dofsByElement.set(k, v);
+      for (const p of s.nodePositions) nodePositions.push(p);
+      for (const [k, v] of s.elementsByNodeIndex)
+        elementsByNodeIndex.set(k, v);
+      mergedAny = true;
+    };
+
+    for (const [dId, elements] of elementsByDomain) {
+      const mat = domainMaterial.get(dId) ?? material;
+      const localStats: { value?: SolveStats } = {};
+      const solved = solve(elements, mat, blockCacheRef.current, localStats);
+      out.push(...solved);
+      mergeStats(localStats.value);
+    }
+    if (loose.length > 0) {
+      const localStats: { value?: SolveStats } = {};
+      const solved = solve(loose, material, blockCacheRef.current, localStats);
+      out.push(...solved);
+      mergeStats(localStats.value);
+    }
+
+    if (mergedAny) {
+      aggStats.value = {
+        assemble: {
+          hits: asmHits,
+          misses: asmMisses,
+          gaussEvals: asmGaussEvals,
+          nodeCount: asmNodeCount,
+          elementCount: asmElementCount,
+        },
+        unknownDofs,
+        dofsByLineId,
+        dofsByElement,
+        nodePositions,
+        elementsByNodeIndex,
+      };
+    }
+    solveStatsRef.current = aggStats;
     const prev = lastSolveDepsRef.current;
     const sameAsPrev =
       prev !== null && prev.mesh === meshElements && prev.mat === material;
     if (!sameAsPrev) {
       lastSolveDepsRef.current = { mesh: meshElements, mat: material };
-      if (solveStatsRef.current.value) {
-        // Don't overwrite a meaningful display with a "no work done"
-        // update — those happen when a re-solve fires for a mesh whose
-        // element content is unchanged from a previous solve (e.g. a
-        // drag-back-to-original-position), so every pair hits cache.
-        // Tooltip's "100% cached, 0 G-evals" pill would clobber the
-        // last real reanalysis numbers. Keep the prior display in that
-        // case so the user can still see what work the last EDIT did.
-        const v = solveStatsRef.current.value;
+      if (aggStats.value) {
+        const v = aggStats.value;
         const noWork = v.assemble.misses === 0 && v.assemble.gaussEvals === 0;
         if (!noWork || stableSolveStatsRef.current === null) {
           stableSolveStatsRef.current = v;
         }
       }
     }
-    return result;
-  }, [meshElements, material]);
+    return out;
+  }, [meshElements, material, model]);
 
   // Promote the solver's latest stats into React state so the toolbar
   // re-renders with the new counts. useState + effect keeps the

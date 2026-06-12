@@ -19,6 +19,49 @@ export function resolveMaterial(model: CadModel): MaterialProperties {
   return model.material ?? DEFAULT_MATERIAL;
 }
 
+/** Resolve the material for a specific Domain. Per-Domain `material`
+ *  wins; then model-level material; then DEFAULT_MATERIAL. Used by
+ *  the multi-zone wiring so each Domain's elements can assemble with
+ *  their own elastic properties. */
+export function resolveDomainMaterial(
+  model: CadModel,
+  domainId: string,
+): MaterialProperties {
+  const d = model.domains.find((dd) => dd.id === domainId);
+  if (d?.material) return d.material as MaterialProperties;
+  return model.material ?? DEFAULT_MATERIAL;
+}
+
+/** Build a quick lookup from Line id → Domain id by walking
+ *  Domain → Boundary → segment.lineId. The first Domain that
+ *  references a given Line wins (rare to have a Line in multiple
+ *  Domains; happens for shared interfaces in future multi-zone work).
+ *  Returns the map plus the resolved material per Domain so callers
+ *  can index by Line directly. */
+export function buildLineDomainMap(
+  model: CadModel,
+): {
+  lineDomainId: ReadonlyMap<string, string>;
+  domainMaterial: ReadonlyMap<string, MaterialProperties>;
+} {
+  const lineDomainId = new Map<string, string>();
+  const domainMaterial = new Map<string, MaterialProperties>();
+  const boundariesById = new Map(model.boundaries.map((b) => [b.id, b]));
+  for (const d of model.domains) {
+    domainMaterial.set(d.id, resolveDomainMaterial(model, d.id));
+    for (const bId of d.boundaryIds) {
+      const b = boundariesById.get(bId);
+      if (!b) continue;
+      for (const seg of b.segments) {
+        if (!lineDomainId.has(seg.lineId)) {
+          lineDomainId.set(seg.lineId, d.id);
+        }
+      }
+    }
+  }
+  return { lineDomainId, domainMaterial };
+}
+
 /** SI value of a DirectionBc, applying its prefix (G=9, M=6, k=3, …).
  *  Mirrors the converter in elements/discretise.ts but exposed here so
  *  callers that only need the magnitude (e.g. the stress-concentration

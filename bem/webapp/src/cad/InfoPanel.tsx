@@ -152,7 +152,13 @@ function renderBody(
       case "boundary":
         return <BoundaryInfo model={model} boundaryId={item.id} />;
       case "domain":
-        return <DomainInfo model={model} domainId={item.id} />;
+        return (
+          <DomainInfo
+            model={model}
+            domainId={item.id}
+            onDispatch={onDispatch}
+          />
+        );
     }
   }
 
@@ -218,14 +224,72 @@ function MaterialEditor({
   onDispatch: (a: CanvasAction) => void;
 }) {
   const mat = resolveMaterial(model);
+  return (
+    <MaterialFields
+      title="Material"
+      mat={mat}
+      onChange={(next) => onDispatch({ type: "setMaterial", material: next })}
+    />
+  );
+}
+
+/** Material fields rendered into a Domain Inspector section. Edits
+ *  the Domain's own `material` override; clearing it lets the Domain
+ *  re-inherit from the model default. */
+function DomainMaterialEditor({
+  model,
+  domainId,
+  onDispatch,
+}: {
+  model: CadModel;
+  domainId: string;
+  onDispatch: (a: CanvasAction) => void;
+}) {
+  const d = model.domains.find((dd) => dd.id === domainId);
+  const hasOverride = !!d?.material;
+  const mat = (d?.material as MaterialProperties | undefined) ?? resolveMaterial(model);
+  return (
+    <MaterialFields
+      title={hasOverride ? "Material (override)" : "Material (inherited)"}
+      mat={mat}
+      onChange={(next) =>
+        onDispatch({ type: "setDomainMaterial", domainId, material: next })
+      }
+      onReset={
+        hasOverride
+          ? () =>
+              onDispatch({
+                type: "setDomainMaterial",
+                domainId,
+                material: undefined,
+              })
+          : undefined
+      }
+    />
+  );
+}
+
+/** Shared material-editing widget — takes a material value + onChange.
+ *  Optional onReset surfaces a "reset to default" button used by the
+ *  per-Domain editor to drop the override. */
+function MaterialFields({
+  title,
+  mat,
+  onChange,
+  onReset,
+}: {
+  title: string;
+  mat: MaterialProperties;
+  onChange: (next: MaterialProperties) => void;
+  onReset?: (() => void) | undefined;
+}) {
   const ePrefix = mat.EPrefix ?? 9;
   const eDisplay = mat.E / Math.pow(10, ePrefix);
   const ePrefixIdx = SI_PREFIXES.findIndex((p) => p.power === ePrefix);
   const ePrefixEntry =
     ePrefixIdx < 0 ? SI_PREFIXES.find((p) => p.power === 9)! : SI_PREFIXES[ePrefixIdx]!;
 
-  const writeMat = (next: MaterialProperties) =>
-    onDispatch({ type: "setMaterial", material: next });
+  const writeMat = (next: MaterialProperties) => onChange(next);
 
   const setE = (displayValue: number, prefixPower: number) => {
     if (!Number.isFinite(displayValue)) return;
@@ -257,7 +321,19 @@ function MaterialEditor({
 
   return (
     <div className="cad-bc-section">
-      <div className="cad-bc-title">Material</div>
+      <div className="cad-bc-title">
+        {title}
+        {onReset && (
+          <button
+            type="button"
+            className="cad-bc-reset"
+            onClick={onReset}
+            title="Drop this override and inherit the default material"
+          >
+            reset
+          </button>
+        )}
+      </div>
       {/* Young's modulus */}
       <div className="cad-bc-row">
         <span className="cad-bc-axis">E</span>
@@ -674,30 +750,41 @@ function BoundaryInfo({
 function DomainInfo({
   model,
   domainId,
+  onDispatch,
 }: {
   model: CadModel;
   domainId: string;
+  onDispatch: (a: CanvasAction) => void;
 }) {
   const d = model.domains.find((x) => x.id === domainId);
   if (!d) return <Missing kind="Domain" />;
   const bById = new Map(model.boundaries.map((b) => [b.id, b]));
   return (
-    <dl className="cad-info-dl">
-      <Term label="Kind">Domain</Term>
-      <Term label="Name">{d.name}</Term>
-      <Term label="Boundaries">
-        <ol className="cad-info-segments">
-          {d.boundaryIds.map((bid, i) => {
-            const b = bById.get(bid);
-            return (
-              <li key={i}>
-                {b ? `${b.name} (${b.segments.length} segments)` : "(missing)"}
-              </li>
-            );
-          })}
-        </ol>
-      </Term>
-    </dl>
+    <>
+      <dl className="cad-info-dl">
+        <Term label="Kind">Domain</Term>
+        <Term label="Name">{d.name}</Term>
+        <Term label="Boundaries">
+          <ol className="cad-info-segments">
+            {d.boundaryIds.map((bid, i) => {
+              const b = bById.get(bid);
+              return (
+                <li key={i}>
+                  {b
+                    ? `${b.name} (${b.segments.length} segments)`
+                    : "(missing)"}
+                </li>
+              );
+            })}
+          </ol>
+        </Term>
+      </dl>
+      <DomainMaterialEditor
+        model={model}
+        domainId={domainId}
+        onDispatch={onDispatch}
+      />
+    </>
   );
 }
 

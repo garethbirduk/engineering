@@ -274,6 +274,11 @@ export type CanvasAction =
   | {
       readonly type: "setMaterial";
       readonly material: NonNullable<CadModel["material"]>;
+    }
+  | {
+      readonly type: "setDomainMaterial";
+      readonly domainId: Id;
+      readonly material: NonNullable<CadModel["material"]> | undefined;
     };
 
 export const INITIAL_STATE: CanvasState = {
@@ -620,6 +625,27 @@ function innerReducer(state: CanvasState, action: CanvasAction): CanvasState {
       return {
         ...state,
         model: { ...state.model, material: action.material },
+      };
+
+    case "setDomainMaterial":
+      return {
+        ...state,
+        model: {
+          ...state.model,
+          domains: state.model.domains.map((d) =>
+            d.id !== action.domainId
+              ? d
+              : action.material === undefined
+                ? // Drop the override → re-inherit from model.material.
+                  // exactOptionalPropertyTypes: must omit the field, not set undefined.
+                  (() => {
+                    const { material: _drop, ...rest } = d;
+                    void _drop;
+                    return rest;
+                  })()
+                : { ...d, material: action.material },
+          ),
+        },
       };
 
     case "cancel":
