@@ -39,6 +39,7 @@ import {
   referenceStress,
   resolveMaterial,
   shapeFunctions,
+  solveMultiDomain,
   shapeFunctionDerivatives,
   solve,
   STANDARD_NODES,
@@ -69,6 +70,12 @@ import {
   loadFromLocalStorage,
   saveToLocalStorage,
 } from "./persistence.js";
+import {
+  buildDomainPolygons,
+  buildSubdomainMesh,
+  detectHoverContext,
+  type HoverContext,
+} from "./operations.js";
 // Bundled default example — loaded on first visit (no localStorage yet)
 // so the deployed page opens with something interesting instead of an
 // empty canvas. ?raw gives us the file contents as a string so we can
@@ -407,7 +414,18 @@ export function CadCanvas() {
         moved: boolean;
         wasDoubleClick: boolean;
         shift: boolean;
+        /** True when the user held Ctrl/Cmd at mousedown — drives both
+         *  the multi-select toggle for Domain / void clicks and the
+         *  ctrl+drag-from-Point duplicate gesture. */
+        ctrl: boolean;
+        /** True when the user held Ctrl (or Cmd) on mousedown over a
+         *  Point — the eventual drag will spawn a duplicate + line. */
+        duplicate: boolean;
         hitKind: "point" | "line" | null;
+        /** Id of the Point the user pressed on, if any — needed to
+         *  parameterise startDuplicateDrag at the drag-threshold
+         *  moment. */
+        hitPointId: string | null;
       }
     | null
   >(null);
@@ -507,7 +525,96 @@ export function CadCanvas() {
     // concatenate. Lines not belonging to any Domain (loose sketch
     // geometry) go through a final "default" solve with the model
     // material.
+    //
+    // INTERFACE CAVEAT — if any Line is referenced by Boundaries
+    // belonging to MORE THAN ONE Domain (i.e. a multi-zone interface
+    // produced by `subdivideDomainAlongInterface`), the current
+    // independent-solve strategy is incorrect: each subdomain's
+    // boundary integral excludes the other side's contributions and
+    // the interface DOFs have no coupling. We detect that case here
+    // and short-circuit with an empty mesh so the user gets no
+    // results rather than wrong ones. Coupled multi-domain assembly
+    // per the thesis §2.7 (u_I1 = u_I2, t_I1 = -t_I2) is on the
+    // roadmap.
+    const lineDomainCount = new Map<string, number>();
+    const seenLineDomain = new Set<string>();
+    for (const d of model.domains) {
+      const boundariesById = new Map(
+        model.boundaries.map((b) => [b.id, b]),
+      );
+      for (const bId of d.boundaryIds) {
+        const b = boundariesById.get(bId);
+        if (!b) continue;
+        for (const seg of b.segments) {
+          const key = `${seg.lineId}|${d.id}`;
+          if (seenLineDomain.has(key)) continue;
+          seenLineDomain.add(key);
+          lineDomainCount.set(
+            seg.lineId,
+            (lineDomainCount.get(seg.lineId) ?? 0) + 1,
+          );
+        }
+      }
+    }
+    let hasInterface = false;
+    for (const c of lineDomainCount.values()) {
+      if (c > 1) {
+        hasInterface = true;
+        break;
+      }
+    }
     const { lineDomainId, domainMaterial } = buildLineDomainMap(model);
+
+    if (hasInterface) {
+      // Multi-zone coupled BEM: each subdomain assembles over its full
+      // boundary (interfaces included), and solveMultiDomain enforces
+      // u_I1=u_I2, t_I1=-t_I2 at every shared-position node.
+      const subdomainInputs = model.domains.map((d) => ({
+        mesh: buildSubdomainMesh(model, d.id),
+        material: domainMaterial.get(d.id) ?? material,
+      }));
+      const couplingStats: { value?: SolveStats } = {};
+      const solvedPerDomain = solveMultiDomain(
+        subdomainInputs,
+        blockCacheRef.current,
+        couplingStats,
+      );
+      // Interface lines appear in two subdomains' meshes, so the
+      // concatenation contains both copies. Their displacement DOFs
+      // agree (we enforced u_I^A = u_I^B in the coupling), so render
+      // and downstream stages need only one element per (lineId,
+      // indexInLine). Keep the first-encountered copy so each physical
+      // interface element is drawn once. Tractions on the dropped copy
+      // would be the sign-flipped side-B values — they're recoverable
+      // from the side-A copy by negating, which the interior-stress
+      // path will need when it gains per-Domain awareness.
+      const seen = new Set<string>();
+      const concatenated: MeshElement[] = [];
+      for (const sm of solvedPerDomain) {
+        for (const el of sm) {
+          const key = `${el.lineId}|${el.indexInLine}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
+          concatenated.push(el);
+        }
+      }
+      solveStatsRef.current = couplingStats;
+      const prev = lastSolveDepsRef.current;
+      const sameAsPrev =
+        prev !== null && prev.mesh === meshElements && prev.mat === material;
+      if (!sameAsPrev) {
+        lastSolveDepsRef.current = { mesh: meshElements, mat: material };
+        if (couplingStats.value) {
+          const v = couplingStats.value;
+          const noWork =
+            v.assemble.misses === 0 && v.assemble.gaussEvals === 0;
+          if (!noWork || stableSolveStatsRef.current === null) {
+            stableSolveStatsRef.current = v;
+          }
+        }
+      }
+      return concatenated;
+    }
     const elementsByDomain = new Map<string, MeshElement[]>();
     const loose: MeshElement[] = [];
     for (const el of meshElements) {
@@ -786,6 +893,20 @@ export function CadCanvas() {
     return null;
   }, [model.points, model.lines, model.boundaries, model.domains]);
 
+  /** Polygons (outer + holes) per Domain, so the canvas can render
+   *  a hover-highlight on the Domain under the cursor and the zone
+   *  chip can classify the cursor position without rebuilding
+   *  polygons every mousemove. */
+  const domainPolygons = useMemo(() => buildDomainPolygons(model), [model]);
+
+  /** Zone classification at the cursor: which Domain (if any) holds
+   *  it, or which hole / external void it sits in. Drives the
+   *  highlight + the toolbar chip + the convert-hole-to-zone action. */
+  const hoverContext: HoverContext | null = useMemo(
+    () => detectHoverContext(cursorWorld, model),
+    [cursorWorld, model],
+  );
+
   /** Internal post-process nodes — wave-front placement.
    *
    *  For every boundary BEM element we drop perpendicular rings inward
@@ -920,12 +1041,24 @@ export function CadCanvas() {
       sharpCorners.map((c) => ptKey(c.x, c.y)),
     );
 
+    // Accept the candidate if it sits inside the material region of
+    // ANY Domain (inside that Domain's CCW outer AND not inside any
+    // of its CW holes). Multi-zone: an inner Domain's outer would be
+    // a hole of the outer Domain; checking per-Domain keeps wave-
+    // front seed points inside inner zones.
     const isInDomain = (p: Vec2): boolean => {
-      if (!pointInPolygon(p, boundaryPolygons.outer)) return false;
-      for (const hole of boundaryPolygons.holes) {
-        if (pointInPolygon(p, hole)) return false;
+      for (const dp of domainPolygons.values()) {
+        if (!pointInPolygon(p, dp.outer)) continue;
+        let inHole = false;
+        for (const hole of dp.holes) {
+          if (pointInPolygon(p, hole)) {
+            inHole = true;
+            break;
+          }
+        }
+        if (!inHole) return true;
       }
-      return true;
+      return false;
     };
 
     // Seed accepted set with the boundary itself (BEM nodes + corner
@@ -1053,7 +1186,7 @@ export function CadCanvas() {
 
     // Return only the interior additions (drop the boundary seeds).
     return accepted.slice(seedCount);
-  }, [meshElements, model.points, boundaryPolygons, sharpCorners]);
+  }, [meshElements, model.points, boundaryPolygons, domainPolygons, sharpCorners]);
 
   /** Delaunay triangulation of (boundary BEM nodes + corner Points +
    *  interior nodes), filtered to keep only triangles whose centroid
@@ -1151,6 +1284,14 @@ export function CadCanvas() {
     }
     const d = new Delaunator(flat);
     const tris: { a: number; b: number; c: number }[] = [];
+    // Build a list of all Domain polygons so the centroid-in-polygon
+    // test keeps any triangle inside ANY Domain's material region.
+    // Multi-zone case: an inner Domain's outer is a hole of the outer
+    // Domain — the old single-Domain check would drop those triangles
+    // (treat the inner zone as hole). Iterating per-Domain instead
+    // keeps triangles whose centroid is inside an outer of one Domain
+    // AND not inside any hole of that same Domain.
+    const domainPolyEntries = Array.from(domainPolygons.values());
     for (let t = 0; t < d.triangles.length; t += 3) {
       const a = d.triangles[t]!;
       const b = d.triangles[t + 1]!;
@@ -1158,23 +1299,35 @@ export function CadCanvas() {
       const pa = pts[a]!;
       const pb = pts[b]!;
       const pc = pts[c]!;
-      // Centroid-in-polygon: drop if outside outer or in any hole.
       const cx = (pa.x + pb.x + pc.x) / 3;
       const cy = (pa.y + pb.y + pc.y) / 3;
       const centroid = { x: cx, y: cy };
-      if (!pointInPolygon(centroid, boundaryPolygons.outer)) continue;
-      let inHole = false;
-      for (const h of boundaryPolygons.holes) {
-        if (pointInPolygon(centroid, h)) {
-          inHole = true;
+      let inAnyMaterial = false;
+      for (const poly of domainPolyEntries) {
+        if (!pointInPolygon(centroid, poly.outer)) continue;
+        let inHole = false;
+        for (const h of poly.holes) {
+          if (pointInPolygon(centroid, h)) {
+            inHole = true;
+            break;
+          }
+        }
+        if (!inHole) {
+          inAnyMaterial = true;
           break;
         }
       }
-      if (inHole) continue;
+      if (!inAnyMaterial) continue;
       tris.push({ a, b, c });
     }
     return { points: pts, triangles: tris, boundaryInfo };
-  }, [meshElements, model.points, internalNodes, boundaryPolygons]);
+  }, [
+    meshElements,
+    model.points,
+    internalNodes,
+    boundaryPolygons,
+    domainPolygons,
+  ]);
 
   /** True when the active field needs the full Cartesian stress tensor
    *  at every vertex (cheap algebra on top derives σvm, σ1, σ2, τmax). */
@@ -1214,27 +1367,40 @@ export function CadCanvas() {
     }
     const N = internalTriangles.points.length;
     const out: StressTriple[] = new Array(N);
+    // boundaryInfo.elementIdx is an index into the *unsolved*
+    // meshElements array (built once and stable). solvedMesh, on the
+    // other hand, is the multi-domain solve result — concatenated and
+    // deduplicated by (lineId, indexInLine) — so its array indexing
+    // differs. Build a (lineId, indexInLine) → solved element map for
+    // robust lookup. For the single-domain happy path it's just a
+    // 1:1 mirror of solvedMesh.
+    const solvedByKey = new Map<string, MeshElement>();
+    for (const el of solvedMesh) {
+      solvedByKey.set(`${el.lineId}|${el.indexInLine}`, el);
+    }
     for (let i = 0; i < N; i++) {
       const info = internalTriangles.boundaryInfo.get(i);
       if (info !== undefined) {
-        // On Γ — use the Kelvin boundary recovery for an exact value
-        // (matches the edge-profile plot).
-        out[i] = boundaryStress(
-          solvedMesh[info.elementIdx]!,
-          info.eta,
-          material,
-        );
-      } else {
-        // Interior — Somigliana stress identity.
-        out[i] = interiorStress(
-          internalTriangles.points[i]!,
-          solvedMesh,
-          material,
-        );
+        const unsolved = meshElements[info.elementIdx];
+        const solved = unsolved
+          ? solvedByKey.get(`${unsolved.lineId}|${unsolved.indexInLine}`)
+          : undefined;
+        if (solved) {
+          // On Γ — use the Kelvin boundary recovery for an exact value
+          // (matches the edge-profile plot).
+          out[i] = boundaryStress(solved, info.eta, material);
+          continue;
+        }
       }
+      // Interior or no solved match — Somigliana stress identity.
+      out[i] = interiorStress(
+        internalTriangles.points[i]!,
+        solvedMesh,
+        material,
+      );
     }
     return out;
-  }, [stressActive, internalTriangles, solvedMesh, material]);
+  }, [stressActive, internalTriangles, solvedMesh, material, meshElements]);
 
   /** Active interior field values at every triangulation vertex.
    *  Displacement fields: BEM-node coincident points use the solved
@@ -1798,7 +1964,11 @@ export function CadCanvas() {
   const domainPaths = useMemo(() => {
     const linesById = new Map(model.lines.map((l) => [l.id, l]));
     const boundariesById = new Map(model.boundaries.map((b) => [b.id, b]));
-    const paths: { kind: "bounded" | "unbounded"; d: string }[] = [];
+    const paths: {
+      kind: "bounded" | "unbounded";
+      d: string;
+      domainId: string;
+    }[] = [];
 
     const subpathFor = (segs: typeof model.boundaries[number]["segments"]) => {
       let sub = "";
@@ -1887,7 +2057,11 @@ export function CadCanvas() {
           if (sub) subs.push(sub);
         }
         if (subs.length > 0) {
-          paths.push({ kind: "bounded", d: subs.join(" ") });
+          paths.push({
+            kind: "bounded",
+            d: subs.join(" "),
+            domainId: domain.id,
+          });
         }
       } else {
         // Unbounded: bands for every member boundary's lines.
@@ -1897,7 +2071,11 @@ export function CadCanvas() {
           if (bands) bandSubs.push(bands);
         }
         if (bandSubs.length > 0) {
-          paths.push({ kind: "unbounded", d: bandSubs.join(" ") });
+          paths.push({
+            kind: "unbounded",
+            d: bandSubs.join(" "),
+            domainId: domain.id,
+          });
         }
       }
     }
@@ -2027,13 +2205,18 @@ export function CadCanvas() {
 
       const downCursor = clientToWorld(svg, view, e.clientX, e.clientY);
       const hit = hitTest(stateRef.current.model, makeCtx(downCursor));
+      const hitPointId =
+        hit.entity?.kind === "point" ? hit.entity.id : null;
       downStateRef.current = {
         clientX: e.clientX,
         clientY: e.clientY,
         moved: false,
         wasDoubleClick: isDoubleClick,
         shift: e.shiftKey,
+        ctrl: e.ctrlKey || e.metaKey,
+        duplicate: (e.ctrlKey || e.metaKey) && hitPointId !== null,
         hitKind: hit.entity?.kind ?? null,
+        hitPointId,
       };
 
       if (isDoubleClick) {
@@ -2198,6 +2381,14 @@ export function CadCanvas() {
                 startClientY: down.clientY,
                 startView: view,
               };
+            } else if (down.duplicate && down.hitPointId !== null) {
+              // Ctrl/Cmd + drag from a Point → spawn a duplicate and
+              // drag it. Trails a connecting Line back to the original.
+              dispatch({
+                type: "startDuplicateDrag",
+                originalPointId: down.hitPointId,
+                cursorOrigin: startWorld,
+              });
             } else if (down.hitKind !== null) {
               // Drag on entity → move it.
               dispatch({
@@ -2224,11 +2415,17 @@ export function CadCanvas() {
       // closure captures the value at render time).
       const liveSession = stateRef.current.dragSession;
       if (liveSession) {
-        const snappedToGrid: Vec2 = {
-          x: Math.round(world.x / gridStep) * gridStep,
-          y: Math.round(world.y / gridStep) * gridStep,
-        };
-        dispatch({ type: "dragTo", cursor: snappedToGrid });
+        // Snap the dragged cursor to existing non-dragged Points so
+        // drops onto coincidence are easy. The merge-on-drop logic in
+        // applyEndDrag turns the perfect coincidence into a single
+        // shared Point. Falls back to grid-snap when no Point is
+        // within reach.
+        const draggedIds = liveSession.originalPositions;
+        const candidates = stateRef.current.model.points.filter(
+          (p) => !draggedIds.has(p.id),
+        );
+        const snap = snapWorld(world, candidates, gridStep, snapRadius);
+        dispatch({ type: "dragTo", cursor: snap.snapped });
         return;
       }
 
@@ -2380,11 +2577,12 @@ export function CadCanvas() {
         return;
       }
 
-      // Simple click: select. Shift = toggle (multi-select); else replace.
+      // Simple click: select. Shift or Ctrl/Cmd = toggle (multi-select);
+      // else replace.
       dispatch({
         type: "click",
         ctx: makeCtx(cursor),
-        toggle: down.shift,
+        toggle: down.shift || down.ctrl,
       });
     },
     [view, makeCtx, marquee, equationsVisible, equationsHover],
@@ -2730,6 +2928,15 @@ export function CadCanvas() {
         canSlice={interiorField !== null && canShowInteriorResults}
         shapeMode={state.shapeMode}
         canFillet={true}
+        hoverContext={hoverContext}
+        selection={selection}
+        model={model}
+        onConvertHoleToBemDomain={(holeBoundaryId) =>
+          dispatch({ type: "convertHoleToBemDomain", holeBoundaryId })
+        }
+        onConvertDomainToVoid={(domainId) =>
+          dispatch({ type: "convertDomainToVoid", domainId })
+        }
         selectionSummary={selectionSummary}
         solveStats={solveStats}
         onCreateDomain={() => dispatch({ type: "createDomainFromSelection" })}
@@ -2793,16 +3000,112 @@ export function CadCanvas() {
             <g transform="scale(1, -1)">
               <Grid view={view} step={gridStep} />
 
-              {domainPaths.map((dp, i) => (
-                <path
-                  key={i}
-                  d={dp.d}
-                  fill="var(--boundary)"
-                  fillRule={dp.kind === "bounded" ? "evenodd" : "nonzero"}
-                  fillOpacity={0.18}
-                  pointerEvents="none"
-                />
-              ))}
+              {(() => {
+                // Hovered Domain id — both "bem" and "void-hole"
+                // resolve to the Domain owning the region.
+                const hoveredId =
+                  hoverContext?.kind === "bem"
+                    ? hoverContext.domainId
+                    : hoverContext?.kind === "void-hole"
+                      ? hoverContext.containingDomainId
+                      : null;
+                // Selected Domain ids and selected hole-void
+                // boundary ids — used to layer a stronger fill /
+                // grey overlay on top of the base domain fills.
+                const selectedDomainIds = new Set<string>();
+                const selectedHoleBoundaryIds = new Set<string>();
+                for (const s of selection) {
+                  if (s.kind === "domain") selectedDomainIds.add(s.id);
+                  else if (s.kind === "void-hole")
+                    selectedHoleBoundaryIds.add(s.holeBoundaryId);
+                }
+                return domainPaths.map((dp, i) => {
+                  const isSelected = selectedDomainIds.has(dp.domainId);
+                  const isHovered = dp.domainId === hoveredId;
+                  // Selected dominates hover; both are subtler than
+                  // the contour fills but distinct enough to read at
+                  // a glance.
+                  const opacity = isSelected ? 0.45 : isHovered ? 0.34 : 0.18;
+                  return (
+                    <path
+                      key={i}
+                      d={dp.d}
+                      fill="var(--boundary)"
+                      fillRule={dp.kind === "bounded" ? "evenodd" : "nonzero"}
+                      fillOpacity={opacity}
+                      pointerEvents="none"
+                    />
+                  );
+                });
+              })()}
+
+              {/* Selected void-hole overlay — light grey fill over
+                  any hole region the user has clicked to select.
+                  Rendered above the domain fills so the colour reads
+                  through the parent Domain's tint. */}
+              {(() => {
+                const selectedHoleIds = new Set<string>();
+                for (const s of selection) {
+                  if (s.kind === "void-hole")
+                    selectedHoleIds.add(s.holeBoundaryId);
+                }
+                if (selectedHoleIds.size === 0) return null;
+                const pathDs: string[] = [];
+                for (const b of model.boundaries) {
+                  if (!selectedHoleIds.has(b.id)) continue;
+                  // Reuse the subpathFor logic inline — small enough
+                  // to inline here rather than refactoring.
+                  let sub = "";
+                  for (let i = 0; i < b.segments.length; i++) {
+                    const seg = b.segments[i]!;
+                    const line = model.lines.find((l) => l.id === seg.lineId);
+                    if (!line) {
+                      sub = "";
+                      break;
+                    }
+                    const startId =
+                      seg.direction === 1 ? line.startId : line.endId;
+                    const endId =
+                      seg.direction === 1 ? line.endId : line.startId;
+                    const start = pointsById.get(startId);
+                    const end = pointsById.get(endId);
+                    if (!start || !end) {
+                      sub = "";
+                      break;
+                    }
+                    if (i === 0) sub += `M ${start.x} ${start.y} `;
+                    if (line.arcCentreId !== undefined) {
+                      const centre = pointsById.get(line.arcCentreId);
+                      if (!centre) {
+                        sub = "";
+                        break;
+                      }
+                      const r = Math.hypot(
+                        centre.x - start.x,
+                        centre.y - start.y,
+                      );
+                      const ex = end.x - start.x;
+                      const ey = end.y - start.y;
+                      const cxv = centre.x - start.x;
+                      const cyv = centre.y - start.y;
+                      const sweep = ex * cyv - ey * cxv > 0 ? 1 : 0;
+                      sub += `A ${r} ${r} 0 0 ${sweep} ${end.x} ${end.y} `;
+                    } else {
+                      sub += `L ${end.x} ${end.y} `;
+                    }
+                  }
+                  if (sub) pathDs.push(sub + "Z");
+                }
+                if (pathDs.length === 0) return null;
+                return (
+                  <path
+                    d={pathDs.join(" ")}
+                    fill="var(--void-selected, #9ca3af)"
+                    fillOpacity={0.45}
+                    pointerEvents="none"
+                  />
+                );
+              })()}
 
               {/* Interior ux contour fill. Each Delaunay triangle is
                   subdivided into N² flat-colour sub-triangles so the

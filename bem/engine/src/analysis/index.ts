@@ -1,9 +1,11 @@
 export * from "./solve.js";
+export { solveMultiDomain, type SubdomainInput } from "./solveMultiDomain.js";
 export * from "./interiorEval.js";
 export * from "./interiorStressEval.js";
 export * from "./boundaryStress.js";
 export {
   createBlockCache,
+  pruneStaleCacheEntries,
   type AssembleStats,
   type BlockCache,
 } from "./assemble.js";

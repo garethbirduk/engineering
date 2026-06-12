@@ -63,18 +63,40 @@ export function createBlockCache(): BlockCache {
   return new Map();
 }
 
+/**
+ * Drop every cache entry whose key isn't in `usedKeys`. Multi-domain
+ * assemble callers use this after running `assembleHG` for each
+ * subdomain with a shared `usedKeysOut` set — pruning once at the
+ * end avoids the "each subdomain's assemble drops the previous
+ * subdomain's entries" trap.
+ */
+export function pruneStaleCacheEntries(
+  cache: BlockCache,
+  usedKeys: ReadonlySet<string>,
+): void {
+  for (const k of cache.keys()) {
+    if (!usedKeys.has(k)) cache.delete(k);
+  }
+}
+
 /** Stable content key for a single MeshElement — anchors + localNodes
  *  rounded to a tight tolerance so float-equality noise on re-derived
- *  positions doesn't trip the cache. */
+ *  positions doesn't trip the cache. Also includes `traverseReversed`
+ *  because that flag flips the outward normal sign in
+ *  `integrateOverElement` (the T* kernel is linear in n, so a
+ *  reversed-flag copy of the same geometric element produces a
+ *  sign-flipped H block — caching them under the same key would
+ *  silently give one of them the wrong H values). */
 function elementContentKey(el: MeshElement): string {
   const q = (x: number) => Math.round(x / KEY_EPS);
   const a0 = el.anchors[0];
   const a1 = el.anchors[1];
   const a2 = el.anchors[2];
   const ln = el.localNodes;
+  const r = el.traverseReversed === true ? "R" : "F";
   return (
     `${q(a0.x)},${q(a0.y)}|${q(a1.x)},${q(a1.y)}|${q(a2.x)},${q(a2.y)}|` +
-    `${q(ln[0])},${q(ln[1])},${q(ln[2])}`
+    `${q(ln[0])},${q(ln[1])},${q(ln[2])}|${r}`
   );
 }
 
@@ -282,6 +304,17 @@ export function assembleHG(
   mesh: readonly MeshElement[],
   material: MaterialProperties,
   cache?: BlockCache,
+  /**
+   * Optional external sink for cache keys touched during this call.
+   * When provided, assembleHG appends every (collocation, field-el,
+   * material) key it looks up to this set AND SKIPS the end-of-call
+   * cache pruning step. The caller becomes responsible for pruning
+   * later — used by `solveMultiDomain` to accumulate touched keys
+   * across all subdomain assembles, then prune once at the end so
+   * one subdomain's entries don't get dropped by the next
+   * subdomain's pruning sweep.
+   */
+  usedKeysOut?: Set<string>,
 ): AssembledSystem {
   const registry = buildNodeRegistry(mesh);
   const N = registry.nodesByIndex.length;
@@ -290,7 +323,12 @@ export function assembleHG(
   const G = Matrix.zeros(size, size);
 
   const matKey = materialContentKey(material);
-  const usedKeys = cache ? new Set<string>() : null;
+  const externalSink = usedKeysOut !== undefined;
+  const usedKeys = externalSink
+    ? usedKeysOut
+    : cache
+      ? new Set<string>()
+      : null;
   const integStats: IntegrationStats = { gaussEvals: 0 };
   let hits = 0;
   let misses = 0;
@@ -384,8 +422,11 @@ export function assembleHG(
 
   // Prune stale cache entries — any key we didn't touch this call is
   // no longer reachable from the current mesh (element moved or got
-  // deleted), so keeping it just leaks memory.
-  if (cache && usedKeys) {
+  // deleted), so keeping it just leaks memory. Skipped when the caller
+  // supplied an external usedKeysOut — multi-domain assembles want to
+  // accumulate touched keys across multiple subdomain calls and prune
+  // once at the end via `pruneStaleCacheEntries`.
+  if (cache && usedKeys && !externalSink) {
     for (const k of cache.keys()) {
       if (!usedKeys.has(k)) cache.delete(k);
     }

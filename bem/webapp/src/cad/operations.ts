@@ -2,6 +2,7 @@
 
 import {
   arcPoint,
+  discretiseLines,
   loopOrientation,
   type BcAssignment,
   type Boundary,
@@ -12,6 +13,7 @@ import {
   type Id,
   type Line,
   type LineDiscretisation,
+  type MeshElement,
   type Point,
   type Vec2,
 } from "@bem/engine";
@@ -504,6 +506,236 @@ function polygonArea(poly: readonly Vec2[]): number {
   return Math.abs(sum) / 2;
 }
 
+/**
+ * Hover context: what the cursor is currently sitting over.
+ *
+ *   bem            — material region of a real BEM Domain
+ *   void-hole      — inside a hole of some Domain (a region currently
+ *                    "void" but convertible to a new Domain by re-using
+ *                    the hole's Boundary as the new Domain's outer)
+ *   void-external  — outside every Domain (truly external; could one
+ *                    day become an infinite-domain BEM zone)
+ *
+ * Designed to extend cleanly to more zone kinds (SBFEM, infinite-domain
+ * BEM) by adding new discriminant values without reshuffling callers.
+ */
+export type HoverContext =
+  | {
+      readonly kind: "bem";
+      readonly domainId: Id;
+      readonly domainName: string;
+    }
+  | {
+      readonly kind: "void-hole";
+      readonly containingDomainId: Id;
+      readonly containingDomainName: string;
+      readonly holeBoundaryId: Id;
+    }
+  | { readonly kind: "void-external" };
+
+/** Classify the cursor's position with respect to the model. Returns
+ *  null when the cursor is not on the canvas (e.g. before first
+ *  mousemove).
+ *
+ *  Resolution rules when multiple Domains overlap (this happens after
+ *  a hole is converted to a zone — the original Domain still has the
+ *  hole AND the new Domain has its outer at the same place):
+ *    1. BEM hits beat void-hole hits. If ANY Domain's material
+ *       contains the cursor, return that Domain — otherwise the
+ *       user would see "void" while standing on top of the new zone.
+ *    2. Among multiple BEM hits (nested zones), prefer the
+ *       smallest-area outer — that's the "innermost" Domain the
+ *       cursor is actually inside.
+ *    3. Otherwise pick the first void-hole hit. */
+export function detectHoverContext(
+  cursor: Vec2 | null,
+  model: CadModel,
+): HoverContext | null {
+  if (!cursor) return null;
+  let bestBem: {
+    domainId: Id;
+    domainName: string;
+    outerArea: number;
+  } | null = null;
+  let firstVoid: {
+    containingDomainId: Id;
+    containingDomainName: string;
+    holeBoundaryId: Id;
+  } | null = null;
+  for (const domain of model.domains) {
+    let outerPoly: Vec2[] | null = null;
+    const holeEntries: { boundaryId: Id; poly: Vec2[] }[] = [];
+    for (const bId of domain.boundaryIds) {
+      const b = model.boundaries.find((bb) => bb.id === bId);
+      if (!b || b.segments.length === 0) continue;
+      const poly = buildBoundaryPolygon(b.segments, model);
+      if (poly.length < 3) continue;
+      const ori = loopOrientation(b.segments, model);
+      if (ori === "ccw") {
+        if (outerPoly === null) outerPoly = poly;
+      } else if (ori === "cw") {
+        holeEntries.push({ boundaryId: bId, poly });
+      }
+    }
+    if (!outerPoly) continue;
+    if (!pointInPolygon(cursor, outerPoly)) continue;
+    let inAnyHole: Id | null = null;
+    for (const h of holeEntries) {
+      if (pointInPolygon(cursor, h.poly)) {
+        inAnyHole = h.boundaryId;
+        break;
+      }
+    }
+    if (inAnyHole !== null) {
+      if (firstVoid === null) {
+        firstVoid = {
+          containingDomainId: domain.id,
+          containingDomainName: domain.name,
+          holeBoundaryId: inAnyHole,
+        };
+      }
+      continue;
+    }
+    // Cursor is in this Domain's material. Keep the smallest-area
+    // outer so nested zones win over their parents.
+    const area = polygonArea(outerPoly);
+    if (bestBem === null || area < bestBem.outerArea) {
+      bestBem = {
+        domainId: domain.id,
+        domainName: domain.name,
+        outerArea: area,
+      };
+    }
+  }
+  if (bestBem !== null) {
+    return {
+      kind: "bem",
+      domainId: bestBem.domainId,
+      domainName: bestBem.domainName,
+    };
+  }
+  if (firstVoid !== null) {
+    return {
+      kind: "void-hole",
+      containingDomainId: firstVoid.containingDomainId,
+      containingDomainName: firstVoid.containingDomainName,
+      holeBoundaryId: firstVoid.holeBoundaryId,
+    };
+  }
+  return { kind: "void-external" };
+}
+
+/**
+ * Build the polygon (outer + holes) for every Domain in `model`,
+ * keyed by Domain id. Useful when the canvas needs to render
+ * per-Domain hover highlights or fills — building each polygon
+ * lazily would be a lot of repeated work as the cursor moves.
+ */
+export function buildDomainPolygons(
+  model: CadModel,
+): ReadonlyMap<Id, { outer: Vec2[]; holes: Vec2[][] }> {
+  const out = new Map<Id, { outer: Vec2[]; holes: Vec2[][] }>();
+  for (const domain of model.domains) {
+    let outer: Vec2[] | null = null;
+    const holes: Vec2[][] = [];
+    for (const bId of domain.boundaryIds) {
+      const b = model.boundaries.find((bb) => bb.id === bId);
+      if (!b || b.segments.length === 0) continue;
+      const poly = buildBoundaryPolygon(b.segments, model);
+      if (poly.length < 3) continue;
+      const ori = loopOrientation(b.segments, model);
+      if (ori === "ccw") {
+        if (outer === null) outer = poly;
+      } else if (ori === "cw") {
+        holes.push(poly);
+      }
+    }
+    if (outer) out.set(domain.id, { outer, holes });
+  }
+  return out;
+}
+
+/**
+ * Convert a Domain back to void — the inverse of `convertHoleToDomain`.
+ * Deletes the Domain and any Boundary it owns that isn't also
+ * referenced by another Domain (shared interfaces or holes stay
+ * intact). The underlying Lines and Points are kept; only the
+ * Boundary + Domain bookkeeping is removed.
+ *
+ * After this runs the geometry is still on the canvas (the user can
+ * still see the lines that formed the Domain's boundary) but the
+ * region no longer participates in any BEM solve.
+ */
+export function convertDomainToVoid(
+  model: CadModel,
+  domainId: Id,
+): { model: CadModel } | null {
+  const domain = model.domains.find((d) => d.id === domainId);
+  if (!domain) return null;
+  // Identify Boundaries owned ONLY by this Domain — these can be removed.
+  // Shared Boundaries (referenced by other Domains too — interfaces and
+  // holes of other Domains) must stay so the other Domains remain valid.
+  const boundariesToDelete = new Set<Id>();
+  for (const bId of domain.boundaryIds) {
+    const sharedElsewhere = model.domains.some(
+      (d) => d.id !== domainId && d.boundaryIds.includes(bId),
+    );
+    if (!sharedElsewhere) boundariesToDelete.add(bId);
+  }
+  return {
+    model: {
+      ...model,
+      domains: model.domains.filter((d) => d.id !== domainId),
+      boundaries: model.boundaries.filter(
+        (b) => !boundariesToDelete.has(b.id),
+      ),
+    },
+  };
+}
+
+/**
+ * Convert a hole-region into a new BEM Domain.
+ *
+ * The hole's Boundary stays in place on its current Domain (it's
+ * still a hole there — material removed). A new Boundary is created
+ * that references the same Lines in the OPPOSITE walk direction (so
+ * it's CCW = outer), and a new Domain wraps it. The result is a
+ * shared interface between the two Domains — exactly the same data
+ * shape produced by the ctrl-drag interface-line gesture, ready for
+ * the (forthcoming) coupled multi-domain solve.
+ */
+export function convertHoleToDomain(
+  model: CadModel,
+  holeBoundaryId: Id,
+): { model: CadModel; newDomainId: Id; newBoundaryId: Id } | null {
+  const hole = model.boundaries.find((b) => b.id === holeBoundaryId);
+  if (!hole || hole.segments.length === 0) return null;
+  // Reverse traversal + flip direction flags → opposite orientation.
+  const newSegments = [...hole.segments].reverse().map((s) => ({
+    lineId: s.lineId,
+    direction: (s.direction === 1 ? -1 : 1) as 1 | -1,
+  }));
+  const newOuter: Boundary = {
+    id: newId(),
+    name: `${hole.name} (zone outer)`,
+    segments: newSegments,
+  };
+  const newDomain: Domain = {
+    id: newId(),
+    name: `Domain ${model.domains.length + 1}`,
+    boundaryIds: [newOuter.id],
+  };
+  return {
+    model: {
+      ...model,
+      boundaries: [...model.boundaries, newOuter],
+      domains: [...model.domains, newDomain],
+    },
+    newDomainId: newDomain.id,
+    newBoundaryId: newOuter.id,
+  };
+}
+
 /** Find the Domain (if any) whose material region contains `probe`
  *  (inside the CCW outer Boundary AND outside every CW hole). Exposed
  *  so the shape-builder commits can decide CCW (outer) vs CW (hole)
@@ -636,6 +868,51 @@ export function placeBoundaryAuto(
   return { model: m, boundaryId: boundary.id, domainId };
 }
 
+/**
+ * Build the mesh for a single Domain by walking only its boundaries.
+ * Interface lines (referenced by multiple Domains) get fresh elements
+ * for THIS Domain's walk direction — duplicate copies of the same
+ * physical element are produced once per Domain that references it.
+ *
+ * Used by the multi-domain coupled solver to feed `solveMultiDomain`
+ * one subdomain-specific mesh per Domain. The function operates by
+ * filtering the model down to a subset where `discretiseLines`'s
+ * boundary walk only sees this Domain's lines and segments.
+ */
+export function buildSubdomainMesh(
+  model: CadModel,
+  domainId: Id,
+): MeshElement[] {
+  const domain = model.domains.find((d) => d.id === domainId);
+  if (!domain) return [];
+  const domainBoundaryIds = new Set(domain.boundaryIds);
+  const boundaries = model.boundaries.filter((b) =>
+    domainBoundaryIds.has(b.id),
+  );
+  const referencedLineIds = new Set<Id>();
+  for (const b of boundaries) {
+    for (const s of b.segments) referencedLineIds.add(s.lineId);
+  }
+  const lines = model.lines.filter((l) => referencedLineIds.has(l.id));
+  const referencedPointIds = new Set<Id>();
+  for (const l of lines) {
+    referencedPointIds.add(l.startId);
+    referencedPointIds.add(l.endId);
+    if (l.arcCentreId !== undefined) referencedPointIds.add(l.arcCentreId);
+  }
+  const points = model.points.filter((p) => referencedPointIds.has(p.id));
+  const subset: CadModel = {
+    ...model,
+    points,
+    lines,
+    boundaries,
+    bcs: model.bcs.filter((bc) => referencedLineIds.has(bc.lineId)),
+    meshing: model.meshing.filter((m) => referencedLineIds.has(m.lineId)),
+    domains: [domain],
+  };
+  return discretiseLines(subset);
+}
+
 /** Helper for createDomainFromSelection: place a *batch* of fresh
  *  closed loops in descending-area order, so each outer loop is in
  *  place before any nested holes look for it. */
@@ -660,4 +937,175 @@ export function placeBoundariesBatch(
     domainIds.add(placed.domainId);
   }
   return { model: m, boundaryIds, domainIds: [...domainIds] };
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Domain subdivision via an interface Line
+// ─────────────────────────────────────────────────────────────────────
+
+/** Pull the walk-entry vertex id of a segment — accounting for
+ *  direction = -1 segments where the line is traversed end→start. */
+function segmentEntryId(
+  seg: BoundarySegment,
+  lines: ReadonlyMap<Id, Line>,
+): Id | null {
+  const line = lines.get(seg.lineId);
+  if (!line) return null;
+  return seg.direction === 1 ? line.startId : line.endId;
+}
+
+/**
+ * If both endpoints of `interfaceLineId` sit on the same Domain's
+ * outer Boundary as walk-junction vertices, split that Domain into
+ * two new Domains sharing this Line as their interface. Returns
+ * the updated model + the two new Domain ids on success, or null if
+ * no Domain qualifies (interface Line endpoints aren't both on the
+ * same outer boundary, or the Boundary is too small / degenerate).
+ *
+ * Any holes inside the original Domain are reassigned to the new
+ * Domain whose outer contains their centroid. The original Domain's
+ * material override (if any) carries to BOTH sub-Domains so the user
+ * isn't surprised by one sub-Domain reverting to model-default.
+ */
+export function subdivideDomainAlongInterface(
+  model: CadModel,
+  interfaceLineId: Id,
+): {
+  model: CadModel;
+  domainIds: readonly [Id, Id];
+} | null {
+  const interfaceLine = model.lines.find((l) => l.id === interfaceLineId);
+  if (!interfaceLine || interfaceLine.arcCentreId !== undefined) return null;
+
+  const linesById = new Map(model.lines.map((l) => [l.id, l]));
+
+  // Find a Domain whose outer Boundary contains both endpoints of
+  // interfaceLine at walk-junction positions.
+  for (const domain of model.domains) {
+    // Outer boundary first.
+    let outerBoundary: Boundary | null = null;
+    const outerOri =
+      (b: Boundary) => loopOrientation(b.segments, model);
+    for (const bId of domain.boundaryIds) {
+      const b = model.boundaries.find((bb) => bb.id === bId);
+      if (b && outerOri(b) === "ccw") {
+        outerBoundary = b;
+        break;
+      }
+    }
+    if (!outerBoundary) continue;
+
+    // Walk vertices in segment order.
+    const verts: Id[] = [];
+    for (const seg of outerBoundary.segments) {
+      const v = segmentEntryId(seg, linesById);
+      if (v) verts.push(v);
+    }
+    const idxA = verts.indexOf(interfaceLine.startId);
+    const idxB = verts.indexOf(interfaceLine.endId);
+    if (idxA < 0 || idxB < 0 || idxA === idxB) continue;
+    // Need at least one segment on each "arc" of the split.
+    const N = verts.length;
+    const segArc1: BoundarySegment[] = [];
+    const segArc2: BoundarySegment[] = [];
+    // Arc 1: walks from idxA → idxB along the boundary segments,
+    // then closes via the interface Line walked B→A.
+    let i = idxA;
+    while (i !== idxB) {
+      segArc1.push(outerBoundary.segments[i]!);
+      i = (i + 1) % N;
+    }
+    // Arc 2: from idxB → idxA.
+    let j = idxB;
+    while (j !== idxA) {
+      segArc2.push(outerBoundary.segments[j]!);
+      j = (j + 1) % N;
+    }
+    if (segArc1.length === 0 || segArc2.length === 0) continue;
+
+    // Close each arc with the interface Line. interface natural
+    // direction is start→end. Arc 1 ends at vertex idxB; the close
+    // must walk B→A → interface direction = -1 (so walk = endId→startId).
+    // Arc 2 ends at vertex idxA; close walks A→B → direction = +1.
+    const arc1: BoundarySegment[] = [
+      ...segArc1,
+      { lineId: interfaceLineId, direction: -1 },
+    ];
+    const arc2: BoundarySegment[] = [
+      ...segArc2,
+      { lineId: interfaceLineId, direction: 1 },
+    ];
+
+    // Build the two new outer Boundary objects.
+    const newOuter1: Boundary = {
+      id: newId(),
+      name: `${outerBoundary.name} (1)`,
+      segments: arc1,
+    };
+    const newOuter2: Boundary = {
+      id: newId(),
+      name: `${outerBoundary.name} (2)`,
+      segments: arc2,
+    };
+
+    // Reassign existing holes to whichever new outer contains their
+    // centroid.
+    const otherBoundaryIds = domain.boundaryIds.filter(
+      (id) => id !== outerBoundary!.id,
+    );
+    const poly1 = buildBoundaryPolygon(arc1, {
+      ...model,
+      boundaries: [...model.boundaries, newOuter1, newOuter2],
+    });
+    const poly2 = buildBoundaryPolygon(arc2, {
+      ...model,
+      boundaries: [...model.boundaries, newOuter1, newOuter2],
+    });
+    const holesFor1: Id[] = [];
+    const holesFor2: Id[] = [];
+    for (const hId of otherBoundaryIds) {
+      const hB = model.boundaries.find((bb) => bb.id === hId);
+      if (!hB) continue;
+      const hPoly = buildBoundaryPolygon(hB.segments, model);
+      if (hPoly.length < 3) continue;
+      const probe = polygonCentroid(hPoly);
+      if (pointInPolygon(probe, poly1)) holesFor1.push(hId);
+      else if (pointInPolygon(probe, poly2)) holesFor2.push(hId);
+      // hole not in either → orphan; drop. Could happen for
+      // ambiguously placed holes; rare in practice.
+    }
+
+    const domain1: Domain = {
+      id: newId(),
+      name: `${domain.name} A`,
+      boundaryIds: [newOuter1.id, ...holesFor1],
+      ...(domain.material ? { material: domain.material } : {}),
+    };
+    const domain2: Domain = {
+      id: newId(),
+      name: `${domain.name} B`,
+      boundaryIds: [newOuter2.id, ...holesFor2],
+      ...(domain.material ? { material: domain.material } : {}),
+    };
+
+    // Remove original outer Boundary + original Domain; add the new
+    // Boundaries + Domains.
+    return {
+      model: {
+        ...model,
+        boundaries: [
+          ...model.boundaries.filter((b) => b.id !== outerBoundary!.id),
+          newOuter1,
+          newOuter2,
+        ],
+        domains: [
+          ...model.domains.filter((d) => d.id !== domain.id),
+          domain1,
+          domain2,
+        ],
+      },
+      domainIds: [domain1.id, domain2.id],
+    };
+  }
+  return null;
 }

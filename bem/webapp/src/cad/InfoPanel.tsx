@@ -499,7 +499,13 @@ function MultiSummary({
   selection: readonly SelectionItem[];
   onDispatch: (a: CanvasAction) => void;
 }) {
-  const counts = { point: 0, line: 0, boundary: 0, domain: 0 };
+  const counts = {
+    point: 0,
+    line: 0,
+    boundary: 0,
+    domain: 0,
+    "void-hole": 0,
+  };
   for (const s of selection) counts[s.kind]++;
   const arcCount = countSelectedArcs(model, selection);
 

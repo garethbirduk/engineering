@@ -38,6 +38,9 @@ import {
 import {
   addLine,
   addPoint,
+  convertDomainToVoid,
+  convertHoleToDomain,
+  detectHoverContext,
   filletCorner,
   findContainingDomain,
   insertCircle,
@@ -47,6 +50,7 @@ import {
   newId,
   placeBoundariesBatch,
   placeBoundaryAuto,
+  subdivideDomainAlongInterface,
 } from "./operations.js";
 import { snapWorld, type SnapResult } from "./snap.js";
 
@@ -71,7 +75,16 @@ export type SelectionItem =
   | { readonly kind: "point"; readonly id: Id }
   | { readonly kind: "line"; readonly id: Id }
   | { readonly kind: "boundary"; readonly id: Id }
-  | { readonly kind: "domain"; readonly id: Id };
+  | { readonly kind: "domain"; readonly id: Id }
+  | {
+      /** A "void" region — the inside of a Domain's hole. Selectable
+       *  so the user can convert it to a new Domain via the toolbar
+       *  chip and so the canvas can render a distinct highlight
+       *  (light grey) over the selected void area. */
+      readonly kind: "void-hole";
+      readonly containingDomainId: Id;
+      readonly holeBoundaryId: Id;
+    };
 
 /**
  * In-progress drag of existing geometry (move-point, move-line, or
@@ -156,6 +169,11 @@ export interface CanvasState {
   /** Pre-drag snapshot. Captured at startDrag, pushed onto undoStack
    *  at endDrag if the drag actually changed the model. */
   readonly dragHistorySnapshot: HistoryEntry | null;
+  /** Set by startDuplicateDrag to the freshly-created Line id; read
+   *  by applyEndDrag's interface-subdivide pass. Cleared after the
+   *  drag (whether subdivide ran or not) so it never leaks into a
+   *  subsequent drag. */
+  readonly pendingInterfaceLineId: Id | null;
   /** Active shape-builder tool. Mutually exclusive with slice mode
    *  and with each other. `null` means normal gesture editing. */
   readonly shapeMode: "circle" | "rect" | "fillet" | null;
@@ -191,6 +209,21 @@ export type CanvasAction =
       readonly type: "startDrag";
       readonly ctx: ClickContext;
       readonly toggle: boolean;
+    }
+  | {
+      /**
+       * Ctrl/Cmd + drag from an existing Point P: create a duplicate
+       * Point P' at the same location, a Line P↔P', and start a
+       * drag-session for P' only. On endDrag, if P' coincides with
+       * another existing Point Q (snap-on-drop), the merge logic in
+       * applyEndDrag collapses P' into Q so the new Line connects
+       * P↔Q. If both Points sit on the same Domain's boundary, the
+       * subdivide pass turns that Domain into two zones with the new
+       * Line as their shared interface.
+       */
+      readonly type: "startDuplicateDrag";
+      readonly originalPointId: Id;
+      readonly cursorOrigin: Vec2;
     }
   | { readonly type: "dragTo"; readonly cursor: Vec2 }
   | { readonly type: "endDrag"; readonly cursor: Vec2; readonly ctx: ClickContext }
@@ -279,6 +312,22 @@ export type CanvasAction =
       readonly type: "setDomainMaterial";
       readonly domainId: Id;
       readonly material: NonNullable<CadModel["material"]> | undefined;
+    }
+  | {
+      /** Convert a hole region into a new BEM Domain. The hole's
+       *  existing Boundary stays where it is; a new outer Boundary
+       *  (same Lines, opposite orientation) is created and wrapped
+       *  in a new Domain. The result is a multi-zone interface
+       *  between the original Domain and the new one. */
+      readonly type: "convertHoleToBemDomain";
+      readonly holeBoundaryId: Id;
+    }
+  | {
+      /** Convert a BEM Domain back to void — drops the Domain and
+       *  any Boundary it owns that isn't shared with another Domain.
+       *  Lines/Points stay on the canvas. */
+      readonly type: "convertDomainToVoid";
+      readonly domainId: Id;
     };
 
 export const INITIAL_STATE: CanvasState = {
@@ -300,6 +349,7 @@ export const INITIAL_STATE: CanvasState = {
   undoStack: [],
   redoStack: [],
   dragHistorySnapshot: null,
+  pendingInterfaceLineId: null,
 };
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -423,6 +473,13 @@ function innerReducer(state: CanvasState, action: CanvasAction): CanvasState {
 
     case "startDrag":
       return startDragForHit(state, action.ctx, action.toggle);
+
+    case "startDuplicateDrag":
+      return startDuplicateDrag(
+        state,
+        action.originalPointId,
+        action.cursorOrigin,
+      );
 
     case "dragTo":
       return applyDragTo(state, action.cursor);
@@ -648,13 +705,37 @@ function innerReducer(state: CanvasState, action: CanvasAction): CanvasState {
         },
       };
 
+    case "convertHoleToBemDomain": {
+      const result = convertHoleToDomain(state.model, action.holeBoundaryId);
+      if (!result) return state;
+      return {
+        ...state,
+        model: result.model,
+        selection: [{ kind: "domain", id: result.newDomainId }],
+      };
+    }
+
+    case "convertDomainToVoid": {
+      const result = convertDomainToVoid(state.model, action.domainId);
+      if (!result) return state;
+      // After the Domain is gone there's no longer anything to keep
+      // selected in its slot. Clear selection — the geometry stays
+      // visible.
+      return {
+        ...state,
+        model: result.model,
+        selection: [],
+      };
+    }
+
     case "cancel":
       if (
         state.selection.length === 0 &&
         state.dragSession === null &&
         state.newLineDraft === null &&
         state.slice === null &&
-        state.shapeDraft === null
+        state.shapeDraft === null &&
+        state.pendingInterfaceLineId === null
       ) {
         return state;
       }
@@ -665,6 +746,7 @@ function innerReducer(state: CanvasState, action: CanvasAction): CanvasState {
         newLineDraft: null,
         slice: null,
         shapeDraft: null,
+        pendingInterfaceLineId: null,
       };
 
     case "undo":
@@ -726,9 +808,32 @@ function applyClick(
 ): CanvasState {
   const hit = computeHit(state.model, ctx);
   if (!hit.entity) {
-    // Click on empty space → clear selection (unless this was a toggle).
-    if (toggle) return state;
-    return state.selection.length === 0 ? state : { ...state, selection: [] };
+    // Click on empty space — classify the zone under the cursor and
+    // select the corresponding Domain or void. External void (cursor
+    // outside every Domain) clears unless this was a toggle click.
+    const zone = detectHoverContext(ctx.cursor, state.model);
+    let item: SelectionItem | null = null;
+    if (zone?.kind === "bem") {
+      item = { kind: "domain", id: zone.domainId };
+    } else if (zone?.kind === "void-hole") {
+      item = {
+        kind: "void-hole",
+        containingDomainId: zone.containingDomainId,
+        holeBoundaryId: zone.holeBoundaryId,
+      };
+    }
+    if (item === null) {
+      // External void (or no Domains): toggle is a no-op (keep
+      // selection), plain click clears.
+      if (toggle) return state;
+      return state.selection.length === 0
+        ? state
+        : { ...state, selection: [] };
+    }
+    if (toggle) {
+      return { ...state, selection: toggleItem(state.selection, item) };
+    }
+    return { ...state, selection: [item] };
   }
   if (toggle) {
     return { ...state, selection: toggleItem(state.selection, hit.entity) };
@@ -741,9 +846,7 @@ function toggleItem(
   selection: readonly SelectionItem[],
   item: SelectionItem,
 ): readonly SelectionItem[] {
-  const idx = selection.findIndex(
-    (s) => s.kind === item.kind && s.id === item.id,
-  );
+  const idx = selection.findIndex((s) => sameSelection(s, item));
   if (idx >= 0) {
     return selection.filter((_, i) => i !== idx);
   }
@@ -888,6 +991,41 @@ function splitLineAtProjection(
  * selection (single-replace) and dragSession set.
  */
 /**
+ * Ctrl+drag duplicate: spawn a new Point at the original Point's
+ * position, a new Line connecting original → new, and start a
+ * single-Point drag session for the new Point. The user can then drag
+ * the duplicate anywhere, and on mouseup the merge-on-drop logic in
+ * applyEndDrag collapses the duplicate into whatever Point it lands
+ * on (if any).
+ */
+function startDuplicateDrag(
+  state: CanvasState,
+  originalPointId: Id,
+  cursorOrigin: Vec2,
+): CanvasState {
+  const original = state.model.points.find((p) => p.id === originalPointId);
+  if (!original) return state;
+  const duplicate = makePoint(original.x, original.y);
+  const newLine = makeLine(originalPointId, duplicate.id);
+  return {
+    ...state,
+    model: {
+      ...state.model,
+      points: [...state.model.points, duplicate],
+      lines: [...state.model.lines, newLine],
+    },
+    selection: [{ kind: "point", id: duplicate.id }],
+    dragSession: {
+      originalPositions: new Map([
+        [duplicate.id, { x: original.x, y: original.y }],
+      ]),
+      cursorOrigin,
+    },
+    pendingInterfaceLineId: newLine.id,
+  };
+}
+
+/**
  * Mousedown→drag setup. If the hit entity is already part of the current
  * selection, the WHOLE selection is dragged (all selected Points + all
  * endpoints of selected Lines). Otherwise the selection is replaced (or
@@ -1009,7 +1147,103 @@ function applyEndDrag(
     return commitNewLine(state, cursor, ctx);
   }
   if (state.dragSession === null) return state;
-  return { ...state, dragSession: null };
+
+  // Snap-on-drop: for every dragged Point, if it now coincides with a
+  // non-dragged Point, merge the two so the user can build closed
+  // loops or interface lines just by overlapping points.
+  const draggedIds = new Set(state.dragSession.originalPositions.keys());
+  const POS_EPS = 1e-6;
+  let model = state.model;
+  const mergedDragged = new Set<Id>();
+  for (const draggedId of draggedIds) {
+    if (mergedDragged.has(draggedId)) continue;
+    const dragged = model.points.find((p) => p.id === draggedId);
+    if (!dragged) continue;
+    const survivor = model.points.find(
+      (p) =>
+        p.id !== draggedId &&
+        !draggedIds.has(p.id) &&
+        Math.abs(p.x - dragged.x) < POS_EPS &&
+        Math.abs(p.y - dragged.y) < POS_EPS,
+    );
+    if (!survivor) continue;
+    model = mergePoints(model, draggedId, survivor.id);
+    mergedDragged.add(draggedId);
+  }
+
+  // If this drag was a duplicate-drag and the freshly-created Line
+  // now spans two boundary Points of the same Domain, subdivide the
+  // Domain so the new Line becomes the shared interface between two
+  // sub-Domains. Skipped (no-op) if the merge collapsed the Line or
+  // the endpoints don't qualify.
+  let selection = state.selection;
+  if (state.pendingInterfaceLineId !== null) {
+    const interfaceLine = model.lines.find(
+      (l) => l.id === state.pendingInterfaceLineId,
+    );
+    if (interfaceLine) {
+      const subdivided = subdivideDomainAlongInterface(
+        model,
+        interfaceLine.id,
+      );
+      if (subdivided) {
+        model = subdivided.model;
+        // Focus the user on one of the new sub-Domains so the
+        // Inspector immediately shows the per-Domain material editor.
+        selection = [{ kind: "domain", id: subdivided.domainIds[0] }];
+      }
+    }
+  }
+
+  return {
+    ...state,
+    model,
+    selection,
+    dragSession: null,
+    pendingInterfaceLineId: null,
+  };
+}
+
+/**
+ * Redirect every reference to `fromId` to `toId`, then drop `fromId`
+ * from the points list. Any Line that collapses to zero length
+ * (start === end) is removed along with its BC / meshing entries, and
+ * any Boundary segment that referenced a removed Line is dropped too.
+ */
+function mergePoints(model: CadModel, fromId: Id, toId: Id): CadModel {
+  if (fromId === toId) return model;
+  const points = model.points.filter((p) => p.id !== fromId);
+  const redirect = (id: Id | undefined): Id | undefined =>
+    id === fromId ? toId : id;
+  const newLines = model.lines.map((l) => ({
+    ...l,
+    startId: redirect(l.startId) ?? l.startId,
+    endId: redirect(l.endId) ?? l.endId,
+    ...(l.arcCentreId !== undefined
+      ? { arcCentreId: redirect(l.arcCentreId)! }
+      : {}),
+  }));
+  // Drop any line that collapsed to zero length.
+  const survivingLines = newLines.filter((l) => l.startId !== l.endId);
+  const removedLineIds = new Set(
+    newLines.filter((l) => l.startId === l.endId).map((l) => l.id),
+  );
+  const boundaries = model.boundaries.map((b) => ({
+    ...b,
+    segments: b.segments.filter((s) => !removedLineIds.has(s.lineId)),
+  }));
+  const bcs = model.bcs.filter((bc) => !removedLineIds.has(bc.lineId));
+  const meshing = model.meshing.filter(
+    (m) => !removedLineIds.has(m.lineId),
+  );
+  return {
+    ...model,
+    points,
+    lines: survivingLines,
+    boundaries,
+    bcs,
+    meshing,
+  };
 }
 
 function commitNewLine(
@@ -1276,18 +1510,37 @@ function applyMarqueeSelect(
     return { ...state, selection: hits };
   }
   // Additive: union, preserving order.
-  const seen = new Set(
-    state.selection.map((s) => `${s.kind}:${s.id}`),
-  );
+  const seen = new Set(state.selection.map(selectionKey));
   const merged: SelectionItem[] = [...state.selection];
   for (const h of hits) {
-    const key = `${h.kind}:${h.id}`;
+    const key = selectionKey(h);
     if (!seen.has(key)) {
       merged.push(h);
       seen.add(key);
     }
   }
   return { ...state, selection: merged };
+}
+
+/** Stable string key for a SelectionItem — used by toggle / dedup
+ *  paths. void-hole items are keyed on their hole boundary id since
+ *  that uniquely identifies the void region. */
+function selectionKey(s: SelectionItem): string {
+  if (s.kind === "void-hole") return `void-hole:${s.holeBoundaryId}`;
+  return `${s.kind}:${s.id}`;
+}
+
+/** Equality test paired with selectionKey — kept separate so the toggle
+ *  loop in toggleItem doesn't pay for string construction. */
+function sameSelection(a: SelectionItem, b: SelectionItem): boolean {
+  if (a.kind !== b.kind) return false;
+  if (a.kind === "void-hole" && b.kind === "void-hole") {
+    return a.holeBoundaryId === b.holeBoundaryId;
+  }
+  if (a.kind !== "void-hole" && b.kind !== "void-hole") {
+    return a.id === b.id;
+  }
+  return false;
 }
 
 function flipSelectedLines(state: CanvasState): CanvasState {

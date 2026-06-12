@@ -212,8 +212,26 @@ function integrateWithRule(
     const dxde_x = dNg[0] * a0.x + dNg[1] * a1.x + dNg[2] * a2.x;
     const dxde_y = dNg[0] * a0.y + dNg[1] * a1.y + dNg[2] * a2.y;
     const J = Math.hypot(dxde_x, dxde_y);
-    // Outward normal: right-of-tangent (matches the editor convention).
-    const n: Vec2 = J > 0 ? { x: dxde_y / J, y: -dxde_x / J } : { x: 0, y: 0 };
+    // Outward normal: right-of-tangent in the *boundary-walk* direction.
+    //
+    // The natural element tangent comes from dxde — which is the line's
+    // start→end direction (line-natural). For segments traversed in the
+    // boundary loop the OTHER way (direction = -1 → traverseReversed),
+    // the boundary-walk tangent is opposite the natural tangent, so the
+    // right-of-walk-tangent normal is the negative of the right-of-
+    // natural-tangent normal. Without this flip, interface elements
+    // shared between two subdomains end up with the natural-direction
+    // normal in both — wrong for whichever subdomain walks the line in
+    // the reversed direction (the "other side" of the interface). With
+    // it, each subdomain sees its own physical outward normal at every
+    // boundary point. */
+    const reverse = element.traverseReversed === true;
+    const n: Vec2 =
+      J > 0
+        ? reverse
+          ? { x: -dxde_y / J, y: dxde_x / J }
+          : { x: dxde_y / J, y: -dxde_x / J }
+        : { x: 0, y: 0 };
 
     // Field-interpolation side — nodes + element's localNodes basis.
     const Nf = shapeFunctions(eta, element.localNodes);
