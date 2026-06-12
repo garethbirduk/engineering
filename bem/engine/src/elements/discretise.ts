@@ -57,9 +57,9 @@ export interface MeshNode {
   readonly ty: number;
 }
 
-/** Default SI prefix per BC kind — mirrors the UI default (MPa / mm). */
+/** Default SI prefix per BC kind — mirrors the UI default (GPa / mm). */
 function defaultPrefixPower(kind: "traction" | "displacement"): number {
-  return kind === "traction" ? 6 : -3;
+  return kind === "traction" ? 9 : -3;
 }
 
 /** BC value in SI base units (Pa or m), applying the SI prefix. */

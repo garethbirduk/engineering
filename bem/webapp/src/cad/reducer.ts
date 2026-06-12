@@ -38,15 +38,34 @@ import {
 import {
   addLine,
   addPoint,
+  filletCorner,
+  findContainingDomain,
+  insertCircle,
+  insertRectangle,
   makeLine,
   makePoint,
   newId,
+  placeBoundariesBatch,
+  placeBoundaryAuto,
 } from "./operations.js";
 import { snapWorld, type SnapResult } from "./snap.js";
 
 // ───────────────────────────────────────────────────────────────────────────
 // Types
 // ───────────────────────────────────────────────────────────────────────────
+
+/** Snapshot pushed onto undo / redo stacks. We pair the model with the
+ *  selection that was in effect at the same time so undo restores both
+ *  together — otherwise a restored model could end up with selection
+ *  entries referencing deleted entities. */
+export interface HistoryEntry {
+  readonly model: CadModel;
+  readonly selection: readonly SelectionItem[];
+}
+
+/** Max snapshots kept in each stack. Bounds memory; old entries are
+ *  silently dropped from the bottom of the undo stack. */
+const HISTORY_LIMIT = 100;
 
 export type SelectionItem =
   | { readonly kind: "point"; readonly id: Id }
@@ -128,6 +147,31 @@ export interface CanvasState {
   /** The active slice line (world coords) — null until the user
    *  finishes a drag in slice mode, then holds the latest one. */
   readonly slice: { readonly start: Vec2; readonly end: Vec2 } | null;
+  /** Undo / redo stacks. Each entry snapshots {model, selection} as
+   *  it was BEFORE a model-mutating action ran. Drag gestures coalesce
+   *  to a single entry (pre-drag → post-drag) via the dragHistorySnapshot
+   *  bookkeeping. Capped at HISTORY_LIMIT to bound memory. */
+  readonly undoStack: readonly HistoryEntry[];
+  readonly redoStack: readonly HistoryEntry[];
+  /** Pre-drag snapshot. Captured at startDrag, pushed onto undoStack
+   *  at endDrag if the drag actually changed the model. */
+  readonly dragHistorySnapshot: HistoryEntry | null;
+  /** Active shape-builder tool. Mutually exclusive with slice mode
+   *  and with each other. `null` means normal gesture editing. */
+  readonly shapeMode: "circle" | "rect" | "fillet" | null;
+  /** In-progress shape preview while the user holds the left button
+   *  down in a shape mode. Cleared on mouseup (and re-shown if the
+   *  user mousedowns again). The shape is committed via dedicated
+   *  reducer actions, not by stashing the draft here. */
+  readonly shapeDraft:
+    | { readonly kind: "circle"; readonly centre: Vec2; readonly edge: Vec2 }
+    | { readonly kind: "rect"; readonly c1: Vec2; readonly c2: Vec2 }
+    | {
+        readonly kind: "fillet";
+        readonly cornerId: Id;
+        readonly radius: number;
+      }
+    | null;
 }
 
 /** Geometric parameters needed to interpret a click/double-click. */
@@ -199,6 +243,31 @@ export type CanvasAction =
       readonly slice: { readonly start: Vec2; readonly end: Vec2 } | null;
     }
   | {
+      readonly type: "setShapeMode";
+      readonly mode: "circle" | "rect" | "fillet" | null;
+    }
+  | {
+      readonly type: "setShapeDraft";
+      readonly draft: CanvasState["shapeDraft"];
+    }
+  | {
+      readonly type: "commitCircle";
+      readonly centre: Vec2;
+      readonly radius: number;
+    }
+  | {
+      readonly type: "commitRectangle";
+      readonly c1: Vec2;
+      readonly c2: Vec2;
+    }
+  | {
+      readonly type: "commitFillet";
+      readonly cornerId: Id;
+      readonly radius: number;
+    }
+  | { readonly type: "undo" }
+  | { readonly type: "redo" }
+  | {
       readonly type: "setInteriorField";
       readonly field: CanvasState["interiorField"];
     }
@@ -221,16 +290,125 @@ export const INITIAL_STATE: CanvasState = {
   equationsVisible: false,
   sliceMode: false,
   slice: null,
+  shapeMode: null,
+  shapeDraft: null,
+  undoStack: [],
+  redoStack: [],
+  dragHistorySnapshot: null,
 };
 
 // ───────────────────────────────────────────────────────────────────────────
 // Reducer
 // ───────────────────────────────────────────────────────────────────────────
 
+/**
+ * Top-level reducer with undo / redo bookkeeping wrapped around the
+ * inner reducer.
+ *
+ *   - undo / redo actions pop / push the model+selection stacks
+ *     directly here (the inner reducer never sees them).
+ *   - For every other action: after the inner reducer runs, if the
+ *     model identity changed AND the action isn't transient (dragTo,
+ *     setShapeDraft, setSlice while dragging), push the previous
+ *     {model, selection} onto undoStack and clear redoStack.
+ *   - Drag gestures coalesce: startDrag captures a snapshot to
+ *     dragHistorySnapshot, intermediate dragTo's are skipped, endDrag
+ *     pushes the captured snapshot if the drag changed anything.
+ */
 export function canvasReducer(
   state: CanvasState,
   action: CanvasAction,
 ): CanvasState {
+  if (action.type === "undo") {
+    const top = state.undoStack[state.undoStack.length - 1];
+    if (!top) return state;
+    return {
+      ...state,
+      model: top.model,
+      selection: top.selection,
+      undoStack: state.undoStack.slice(0, -1),
+      redoStack: [
+        ...state.redoStack,
+        { model: state.model, selection: state.selection },
+      ].slice(-HISTORY_LIMIT),
+      // Reset transient drag / draft state so the user isn't left
+      // mid-gesture after an undo.
+      dragSession: null,
+      newLineDraft: null,
+      shapeDraft: null,
+      dragHistorySnapshot: null,
+    };
+  }
+  if (action.type === "redo") {
+    const top = state.redoStack[state.redoStack.length - 1];
+    if (!top) return state;
+    return {
+      ...state,
+      model: top.model,
+      selection: top.selection,
+      redoStack: state.redoStack.slice(0, -1),
+      undoStack: [
+        ...state.undoStack,
+        { model: state.model, selection: state.selection },
+      ].slice(-HISTORY_LIMIT),
+      dragSession: null,
+      newLineDraft: null,
+      shapeDraft: null,
+      dragHistorySnapshot: null,
+    };
+  }
+
+  // Capture a pre-drag snapshot at the start of any drag, so the
+  // entire drag (many dragTo's + one endDrag) coalesces into a single
+  // undo unit.
+  if (action.type === "startDrag" && state.dragHistorySnapshot === null) {
+    state = {
+      ...state,
+      dragHistorySnapshot: {
+        model: state.model,
+        selection: state.selection,
+      },
+    };
+  }
+
+  const next = innerReducer(state, action);
+
+  // Drag-end: commit the pre-drag snapshot to undoStack iff the drag
+  // actually changed the model.
+  if (action.type === "endDrag" && state.dragHistorySnapshot !== null) {
+    const snap = state.dragHistorySnapshot;
+    if (snap.model !== next.model) {
+      return {
+        ...next,
+        undoStack: [...next.undoStack, snap].slice(-HISTORY_LIMIT),
+        redoStack: [],
+        dragHistorySnapshot: null,
+      };
+    }
+    return { ...next, dragHistorySnapshot: null };
+  }
+
+  // dragTo and setShapeDraft are transient — never history points.
+  if (action.type === "dragTo" || action.type === "setShapeDraft") {
+    return next;
+  }
+
+  // Any other action: if the model changed, this is a history point.
+  if (next.model !== state.model) {
+    return {
+      ...next,
+      undoStack: [
+        ...next.undoStack,
+        { model: state.model, selection: state.selection },
+      ].slice(-HISTORY_LIMIT),
+      redoStack: [],
+    };
+  }
+  return next;
+}
+
+/** The actual state-machine — no history awareness. */
+function innerReducer(state: CanvasState, action: CanvasAction): CanvasState {
   switch (action.type) {
     case "click":
       return applyClick(state, action.ctx, action.toggle);
@@ -318,14 +496,122 @@ export function canvasReducer(
     case "toggleSlice":
       // Turning slice mode off clears any in-flight slice — otherwise
       // it'd linger in the Results panel with no way to remove it.
+      // Turning it on also exits any shape-builder mode.
       return {
         ...state,
         sliceMode: !state.sliceMode,
         slice: state.sliceMode ? null : state.slice,
+        shapeMode: !state.sliceMode ? null : state.shapeMode,
+        shapeDraft: !state.sliceMode ? null : state.shapeDraft,
       };
 
     case "setSlice":
       return { ...state, slice: action.slice };
+
+    case "setShapeMode":
+      // Switching shape mode (or turning it off) always discards any
+      // in-progress draft. Slice mode is mutually exclusive too.
+      return {
+        ...state,
+        shapeMode: action.mode,
+        shapeDraft: null,
+        sliceMode: action.mode !== null ? false : state.sliceMode,
+        slice: action.mode !== null ? null : state.slice,
+      };
+
+    case "setShapeDraft":
+      return { ...state, shapeDraft: action.draft };
+
+    case "commitCircle": {
+      if (action.radius <= 0) return { ...state, shapeDraft: null };
+      // Decide orientation BEFORE constructing the arcs. If the
+      // circle centre lies inside an existing Domain's material, this
+      // is a hole → build CW so each arc's natural startId → endId
+      // forms the CW connecting cycle. Otherwise build CCW (outer).
+      const containing = findContainingDomain(state.model, action.centre);
+      const orientation = containing ? "cw" : "ccw";
+      const inserted = insertCircle(
+        state.model,
+        action.centre,
+        action.radius,
+        orientation,
+      );
+      const segments = inserted.arcIds.map(
+        (id) => ({ lineId: id, direction: 1 as const }),
+      );
+      const placed = placeBoundaryAuto(inserted.model, segments);
+      if (!placed) {
+        return {
+          ...state,
+          model: inserted.model,
+          shapeDraft: null,
+          selection: inserted.arcIds.map(
+            (id) => ({ kind: "line", id }) as const,
+          ),
+        };
+      }
+      return {
+        ...state,
+        model: placed.model,
+        shapeDraft: null,
+        selection: [{ kind: "domain", id: placed.domainId }],
+      };
+    }
+
+    case "commitRectangle": {
+      const dx = action.c2.x - action.c1.x;
+      const dy = action.c2.y - action.c1.y;
+      if (Math.abs(dx) < 1e-9 || Math.abs(dy) < 1e-9) {
+        return { ...state, shapeDraft: null };
+      }
+      // Hole-vs-outer detection using the rectangle's centre. Build
+      // the lines so the natural startId → endId of each forms the
+      // connecting cycle for that orientation (CW for hole, CCW for
+      // outer) — no post-construction flip needed.
+      const probe = {
+        x: (action.c1.x + action.c2.x) / 2,
+        y: (action.c1.y + action.c2.y) / 2,
+      };
+      const containing = findContainingDomain(state.model, probe);
+      const orientation = containing ? "cw" : "ccw";
+      const inserted = insertRectangle(
+        state.model,
+        action.c1,
+        action.c2,
+        orientation,
+      );
+      const segments = inserted.lineIds.map(
+        (id) => ({ lineId: id, direction: 1 as const }),
+      );
+      const placed = placeBoundaryAuto(inserted.model, segments);
+      if (!placed) {
+        return {
+          ...state,
+          model: inserted.model,
+          shapeDraft: null,
+          selection: inserted.lineIds.map(
+            (id) => ({ kind: "line", id }) as const,
+          ),
+        };
+      }
+      return {
+        ...state,
+        model: placed.model,
+        shapeDraft: null,
+        selection: [{ kind: "domain", id: placed.domainId }],
+      };
+    }
+
+    case "commitFillet": {
+      const result = filletCorner(state.model, action.cornerId, action.radius);
+      if (!result) return { ...state, shapeDraft: null };
+      return {
+        ...state,
+        model: result.model,
+        shapeDraft: null,
+        selection: [{ kind: "line", id: result.arcLineId }],
+      };
+    }
 
     case "setInteriorField":
       return { ...state, interiorField: action.field };
@@ -341,7 +627,8 @@ export function canvasReducer(
         state.selection.length === 0 &&
         state.dragSession === null &&
         state.newLineDraft === null &&
-        state.slice === null
+        state.slice === null &&
+        state.shapeDraft === null
       ) {
         return state;
       }
@@ -351,7 +638,13 @@ export function canvasReducer(
         dragSession: null,
         newLineDraft: null,
         slice: null,
+        shapeDraft: null,
       };
+
+    case "undo":
+    case "redo":
+      // Intercepted by the outer reducer; never reaches here.
+      return state;
   }
 }
 
@@ -788,48 +1081,55 @@ function createDomainFromSelection(state: CanvasState): CanvasState {
     .filter((s) => s.kind === "line")
     .map((s) => s.id);
 
+  // Selected lines → use auto-place: each closed loop becomes a Boundary
+  // placed in a new Domain or spliced as a hole into an existing one. The
+  // batch helper sorts by area so the outer loop is in place before any
+  // nested loops look for a containing Domain.
   let model = state.model;
   const newBoundaryIds: Id[] = [];
-
+  const placedDomainIds: Id[] = [];
   if (lineIds.length > 0) {
     const loops = findAllClosedLoops(lineIds, state.model);
     if (loops === null) {
-      // Selected lines don't decompose cleanly into closed loops. If we
-      // had no boundary selection either, the action can't proceed.
       if (existingBoundaryIds.length === 0) return state;
     } else {
-      for (const segments of loops) {
-        // model.boundaries grows each iteration, so its length already
-        // accounts for previously-created loops in this commit.
-        const boundary: Boundary = {
-          id: newId(),
-          name: `Boundary ${model.boundaries.length + 1}`,
-          segments: [...segments],
-        };
-        model = {
-          ...model,
-          boundaries: [...model.boundaries, boundary],
-        };
-        newBoundaryIds.push(boundary.id);
-      }
+      const batch = placeBoundariesBatch(model, loops);
+      model = batch.model;
+      newBoundaryIds.push(...batch.boundaryIds);
+      placedDomainIds.push(...batch.domainIds);
     }
   }
 
-  const allBoundaryIds = [...existingBoundaryIds, ...newBoundaryIds];
-  if (allBoundaryIds.length === 0) return state;
-
-  const domain: Domain = {
-    id: newId(),
-    name: `Domain ${model.domains.length + 1}`,
-    boundaryIds: allBoundaryIds,
-  };
-  return {
-    ...state,
-    model: {
+  // Existing-Boundary selection (no auto-detect needed — user is
+  // explicitly grouping pre-built loops): bundle them into one fresh
+  // Domain unchanged from before.
+  if (existingBoundaryIds.length > 0) {
+    const domain: Domain = {
+      id: newId(),
+      name: `Domain ${model.domains.length + 1}`,
+      boundaryIds: [...existingBoundaryIds],
+    };
+    model = {
       ...model,
       domains: [...model.domains, domain],
-    },
-    selection: [{ kind: "domain", id: domain.id }],
+    };
+    placedDomainIds.push(domain.id);
+  }
+
+  if (newBoundaryIds.length === 0 && existingBoundaryIds.length === 0) {
+    return state;
+  }
+
+  // Selection: prefer the LAST domain we touched (the user's most recent
+  // action sets the focus). Single-item selection keeps the Inspector
+  // showing the new Domain's details.
+  const focusDomainId = placedDomainIds[placedDomainIds.length - 1];
+  return {
+    ...state,
+    model,
+    selection: focusDomainId
+      ? [{ kind: "domain", id: focusDomainId }]
+      : [],
   };
 }
 

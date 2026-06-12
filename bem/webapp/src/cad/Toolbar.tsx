@@ -19,6 +19,8 @@ interface ToolbarProps {
   readonly equationsVisible: boolean;
   readonly sliceMode: boolean;
   readonly canSlice: boolean;
+  readonly shapeMode: "circle" | "rect" | "fillet" | null;
+  readonly canFillet: boolean;
   readonly selectionSummary: string;
   readonly solveStats: SolveStats | null;
   readonly onCreateDomain: () => void;
@@ -30,6 +32,9 @@ interface ToolbarProps {
   readonly onToggleLabels: () => void;
   readonly onToggleEquations: () => void;
   readonly onToggleSlice: () => void;
+  readonly onSetShapeMode: (
+    mode: "circle" | "rect" | "fillet" | null,
+  ) => void;
   readonly onSave: () => void;
   readonly onLoad: () => void;
   readonly onNew: () => void;
@@ -95,6 +100,8 @@ export function Toolbar({
   equationsVisible,
   sliceMode,
   canSlice,
+  shapeMode,
+  canFillet,
   selectionSummary,
   solveStats,
   onCreateDomain,
@@ -106,6 +113,7 @@ export function Toolbar({
   onToggleLabels,
   onToggleEquations,
   onToggleSlice,
+  onSetShapeMode,
   onSave,
   onLoad,
   onNew,
@@ -134,6 +142,40 @@ export function Toolbar({
           <kbd>Del</kbd>
         </button>
       )}
+      <button
+        type="button"
+        className={`cad-tool ${shapeMode === "rect" ? "cad-tool--active" : ""}`}
+        onClick={() => onSetShapeMode(shapeMode === "rect" ? null : "rect")}
+        aria-pressed={shapeMode === "rect"}
+        title="Rectangle: click + drag two corners"
+      >
+        Rect
+      </button>
+      <button
+        type="button"
+        className={`cad-tool ${shapeMode === "circle" ? "cad-tool--active" : ""}`}
+        onClick={() => onSetShapeMode(shapeMode === "circle" ? null : "circle")}
+        aria-pressed={shapeMode === "circle"}
+        title="Circle: click + drag from centre to radius (four CCW quarter-arcs)"
+      >
+        Circle
+      </button>
+      <button
+        type="button"
+        className={`cad-tool ${shapeMode === "fillet" ? "cad-tool--active" : ""}`}
+        onClick={() =>
+          onSetShapeMode(shapeMode === "fillet" ? null : "fillet")
+        }
+        aria-pressed={shapeMode === "fillet"}
+        disabled={!canFillet}
+        title={
+          canFillet
+            ? "Fillet: click a corner Point + drag to set the radius (tangent arc replaces the sharp corner)"
+            : "Need a Point joining two straight Lines to enable"
+        }
+      >
+        Fillet
+      </button>
       <div className="cad-toolbar-spacer" />
       {solveStats && <SolveStatsPill stats={solveStats} />}
       <div className="cad-toolbar-status" aria-live="polite">

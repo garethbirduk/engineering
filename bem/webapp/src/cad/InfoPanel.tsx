@@ -1556,9 +1556,9 @@ const SI_PREFIXES: readonly { readonly symbol: string; readonly power: number }[
   { symbol: "p", power: -12 },
 ];
 
-/** Default prefix per BC kind, matching the historical MPa / mm display. */
+/** Default prefix per BC kind — GPa for traction, mm for displacement. */
 function defaultPrefixPower(kind: "traction" | "displacement"): number {
-  return kind === "traction" ? 6 : -3;
+  return kind === "traction" ? 9 : -3;
 }
 
 /** Base unit per BC kind (the part after the prefix). */

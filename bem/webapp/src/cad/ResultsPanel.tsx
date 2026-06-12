@@ -9,7 +9,7 @@
 // at every triangulation vertex; derived stress scalars (σvm, σ1, σ2,
 // τmax) — algebra on the Cartesian components, evaluated per vertex.
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   bandEdgeValues,
   bandEdgeValuesSequential,
@@ -60,6 +60,10 @@ export interface EdgeProfile {
     readonly lineId: string;
     readonly arc: number;
     readonly value: number;
+    /** World position of this sample — used by the canvas to render
+     *  a hover-tracking marker in sync with the plot's crosshair. */
+    readonly x: number;
+    readonly y: number;
   }[])[];
   /** Element nodes — 3 per element, drawn as dots. */
   readonly nodes: readonly {
@@ -136,6 +140,13 @@ interface ResultsPanelProps {
   /** True when `edgeProfile` came from the slice tool — changes the
    *  section label so the user can tell which source is plotted. */
   readonly isSlice?: boolean;
+  /** Fires whenever the user's crosshair lands on (or leaves) a
+   *  curve sample. The canvas uses this to render a white marker at
+   *  the matching world position, so the user can see where the
+   *  hovered graph value lives in the model. */
+  readonly onHoverWorld?:
+    | ((world: { x: number; y: number } | null) => void)
+    | undefined;
   /** Click handler. Pass the same field again to toggle off. */
   readonly onSelectField: (field: InteriorField | null) => void;
 }
@@ -152,6 +163,7 @@ export function ResultsPanel({
   canShowResults,
   edgeProfile,
   isSlice = false,
+  onHoverWorld,
   onSelectField,
 }: ResultsPanelProps) {
   const activeLabel = (() => {
@@ -219,7 +231,10 @@ export function ResultsPanel({
               : `Along selected edge${edgeProfile && edgeProfile.segments.length > 1 ? "s" : ""} (${activeLabel})`}
           </div>
           {edgeProfile ? (
-            <EdgeProfilePlot profile={edgeProfile} />
+            <EdgeProfilePlot
+              profile={edgeProfile}
+              onHoverWorld={onHoverWorld}
+            />
           ) : (
             <div className="results-hint">
               Select one or more boundary lines (or draw a slice in Slice
@@ -232,7 +247,15 @@ export function ResultsPanel({
   );
 }
 
-function EdgeProfilePlot({ profile }: { readonly profile: EdgeProfile }) {
+function EdgeProfilePlot({
+  profile,
+  onHoverWorld,
+}: {
+  readonly profile: EdgeProfile;
+  readonly onHoverWorld?:
+    | ((world: { x: number; y: number } | null) => void)
+    | undefined;
+}) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoverArc, setHoverArc] = useState<number | null>(null);
 
@@ -287,13 +310,26 @@ function EdgeProfilePlot({ profile }: { readonly profile: EdgeProfile }) {
 
   // Flat list of all curve samples, ordered by global arc length.
   // Used by the crosshair to snap to the nearest curve point under
-  // the cursor's x position.
+  // the cursor's x position. Each sample carries the world position
+  // it was taken at so the canvas can render a tracking marker.
   const flatSamples = useMemo(() => {
-    const out: { arc: number; value: number; lineId: string }[] = [];
+    const out: {
+      arc: number;
+      value: number;
+      lineId: string;
+      x: number;
+      y: number;
+    }[] = [];
     for (const line of profile.curveByLine) {
       for (const p of line) {
         if (Number.isFinite(p.value)) {
-          out.push({ arc: p.arc, value: p.value, lineId: p.lineId });
+          out.push({
+            arc: p.arc,
+            value: p.value,
+            lineId: p.lineId,
+            x: p.x,
+            y: p.y,
+          });
         }
       }
     }
@@ -317,6 +353,25 @@ function EdgeProfilePlot({ profile }: { readonly profile: EdgeProfile }) {
     }
     return best;
   })();
+
+  // Notify the canvas of the matching world position so it can render
+  // a tracking marker. Fires on every render where `hover` changes.
+  const lastHoverWorldRef = useRef<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    if (!onHoverWorld) return;
+    const next = hover ? { x: hover.x, y: hover.y } : null;
+    const prev = lastHoverWorldRef.current;
+    const same =
+      (prev === null && next === null) ||
+      (prev !== null &&
+        next !== null &&
+        prev.x === next.x &&
+        prev.y === next.y);
+    if (!same) {
+      lastHoverWorldRef.current = next;
+      onHoverWorld(next);
+    }
+  });
 
   const onMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
     const svg = svgRef.current;

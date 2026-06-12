@@ -305,6 +305,14 @@ export function CadCanvas() {
   const [view, setView] = useState<ViewBox>(INITIAL_VIEW);
   const [state, dispatch] = useReducer(canvasReducer, INITIAL_STATE);
   const [cursorWorld, setCursorWorld] = useState<Vec2 | null>(null);
+  // World position of the Results-panel plot's hover crosshair. Set
+  // by ResultsPanel via onHoverWorld; rendered on the canvas as a
+  // small white tracking circle so the user can see where the
+  // currently-pointed graph value lives in the model.
+  const [profileHoverWorld, setProfileHoverWorld] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
   const [snap, setSnap] = useState<ReturnType<typeof snapWorld> | null>(null);
   // Hover state for the matrix view's element-level highlight. The ref
   // shadows the state so the change-detection in onMouseMove doesn't
@@ -418,6 +426,15 @@ export function CadCanvas() {
   // immediately, so the old one disappears the moment the new drag
   // begins.
   const sliceDragRef = useRef<Vec2 | null>(null);
+  // Shape-builder drag: holds the "first point" of the in-progress
+  // shape (centre for circle, first corner for rect, corner Point id
+  // for fillet) while the user holds the left button down. mouseup
+  // clears it (the committed shape lives in the model).
+  const shapeDragRef = useRef<
+    | { kind: "circle" | "rect"; start: Vec2 }
+    | { kind: "fillet"; cornerId: string; corner: Vec2 }
+    | null
+  >(null);
 
   const gridStep = gridStepForViewWidth(view.width);
   // gridStep is now ~viewWidth/60 (4× denser than the old visual). Keep
@@ -1333,7 +1350,13 @@ export function CadCanvas() {
     const ANCHORS = STANDARD_NODES.continuous;
     const SAMPLES_PER_ELEM = 20;
 
-    const curveByLine: { lineId: string; arc: number; value: number }[][] = [];
+    const curveByLine: {
+      lineId: string;
+      arc: number;
+      value: number;
+      x: number;
+      y: number;
+    }[][] = [];
     const nodes: { arc: number; value: number; lineId: string }[] = [];
     const segments: {
       lineId: string;
@@ -1349,7 +1372,13 @@ export function CadCanvas() {
       const els = solvedByLine.get(lineId);
       if (!els || els.length === 0) continue;
       const segStartArc = arcOffset;
-      const segCurve: { lineId: string; arc: number; value: number }[] = [];
+      const segCurve: {
+        lineId: string;
+        arc: number;
+        value: number;
+        x: number;
+        y: number;
+      }[] = [];
       let segStartPoint: Vec2 | null = null;
       let segEndPoint: Vec2 | null = null;
 
@@ -1380,7 +1409,7 @@ export function CadCanvas() {
             material,
             sigmaRef,
           );
-          segCurve.push({ lineId, arc: arcOffset, value });
+          segCurve.push({ lineId, arc: arcOffset, value, x, y });
         }
         if (prev) segEndPoint = prev;
 
@@ -1583,7 +1612,13 @@ export function CadCanvas() {
     // time. Scale up if you want finer steps; this is plenty for the
     // current example sizes.
     const SAMPLES = 200;
-    const curve: { lineId: string; arc: number; value: number }[] = [];
+    const curve: {
+      lineId: string;
+      arc: number;
+      value: number;
+      x: number;
+      y: number;
+    }[] = [];
     for (let i = 0; i <= SAMPLES; i++) {
       const t = i / SAMPLES;
       const arc = t * totalArc;
@@ -1593,6 +1628,8 @@ export function CadCanvas() {
         lineId: "slice",
         arc,
         value: Number.isFinite(v) ? v : 0,
+        x: p.x,
+        y: p.y,
       });
     }
 
@@ -1850,6 +1887,67 @@ export function CadCanvas() {
         return;
       }
 
+      // Shape-builder modes also take over the left-mouse gesture.
+      const sm = stateRef.current.shapeMode;
+      if (sm !== null) {
+        const downWorld = clientToWorld(svg, view, e.clientX, e.clientY);
+        if (sm === "circle") {
+          // Snap centre to grid for tidy radii / coords.
+          const snapped: Vec2 = {
+            x: Math.round(downWorld.x / gridStep) * gridStep,
+            y: Math.round(downWorld.y / gridStep) * gridStep,
+          };
+          shapeDragRef.current = { kind: "circle", start: snapped };
+          dispatch({
+            type: "setShapeDraft",
+            draft: { kind: "circle", centre: snapped, edge: snapped },
+          });
+          e.preventDefault();
+          return;
+        }
+        if (sm === "rect") {
+          const snapped: Vec2 = {
+            x: Math.round(downWorld.x / gridStep) * gridStep,
+            y: Math.round(downWorld.y / gridStep) * gridStep,
+          };
+          shapeDragRef.current = { kind: "rect", start: snapped };
+          dispatch({
+            type: "setShapeDraft",
+            draft: { kind: "rect", c1: snapped, c2: snapped },
+          });
+          e.preventDefault();
+          return;
+        }
+        if (sm === "fillet") {
+          // Fillet target picking: only Point hits matter; clicks on
+          // empty / lines are no-ops.
+          const hit = hitTest(stateRef.current.model, makeCtx(downWorld));
+          if (hit.entity?.kind === "point") {
+            const pt = stateRef.current.model.points.find(
+              (p) => p.id === hit.entity!.id,
+            );
+            if (pt) {
+              shapeDragRef.current = {
+                kind: "fillet",
+                cornerId: pt.id,
+                corner: { x: pt.x, y: pt.y },
+              };
+              dispatch({
+                type: "setShapeDraft",
+                draft: { kind: "fillet", cornerId: pt.id, radius: 0 },
+              });
+              e.preventDefault();
+              return;
+            }
+          }
+          // Picking didn't land on a Point — fall through? Better to
+          // just swallow so the user doesn't accidentally start a
+          // marquee / drag while in fillet mode.
+          e.preventDefault();
+          return;
+        }
+      }
+
       const now = performance.now();
       const last = lastDownRef.current;
       const isDoubleClick =
@@ -1908,6 +2006,35 @@ export function CadCanvas() {
           type: "setSlice",
           slice: { start: sliceDragRef.current, end: world },
         });
+        return;
+      }
+
+      // Shape-builder drag: update the draft (rect's second corner,
+      // circle's edge point, or fillet's radius — derived from the
+      // distance to the picked corner Point).
+      const sd = shapeDragRef.current;
+      if (sd !== null) {
+        if (sd.kind === "rect") {
+          const snapped: Vec2 = {
+            x: Math.round(world.x / gridStep) * gridStep,
+            y: Math.round(world.y / gridStep) * gridStep,
+          };
+          dispatch({
+            type: "setShapeDraft",
+            draft: { kind: "rect", c1: sd.start, c2: snapped },
+          });
+        } else if (sd.kind === "circle") {
+          dispatch({
+            type: "setShapeDraft",
+            draft: { kind: "circle", centre: sd.start, edge: world },
+          });
+        } else if (sd.kind === "fillet") {
+          const r = Math.hypot(world.x - sd.corner.x, world.y - sd.corner.y);
+          dispatch({
+            type: "setShapeDraft",
+            draft: { kind: "fillet", cornerId: sd.cornerId, radius: r },
+          });
+        }
         return;
       }
 
@@ -2099,6 +2226,44 @@ export function CadCanvas() {
         return;
       }
 
+      // Shape-builder mouseup: commit via the appropriate action.
+      const sd = shapeDragRef.current;
+      if (sd !== null) {
+        shapeDragRef.current = null;
+        if (sd.kind === "rect") {
+          const snapped: Vec2 = {
+            x: Math.round(cursor.x / gridStep) * gridStep,
+            y: Math.round(cursor.y / gridStep) * gridStep,
+          };
+          dispatch({
+            type: "commitRectangle",
+            c1: sd.start,
+            c2: snapped,
+          });
+        } else if (sd.kind === "circle") {
+          const r = Math.hypot(
+            cursor.x - sd.start.x,
+            cursor.y - sd.start.y,
+          );
+          dispatch({
+            type: "commitCircle",
+            centre: sd.start,
+            radius: r,
+          });
+        } else if (sd.kind === "fillet") {
+          const r = Math.hypot(
+            cursor.x - sd.corner.x,
+            cursor.y - sd.corner.y,
+          );
+          dispatch({
+            type: "commitFillet",
+            cornerId: sd.cornerId,
+            radius: r,
+          });
+        }
+        return;
+      }
+
       // Always end any active drag / commit any new-line draft on mouseup.
       if (stateRef.current.dragSession || stateRef.current.newLineDraft) {
         dispatch({ type: "endDrag", cursor, ctx: makeCtx(cursor) });
@@ -2160,6 +2325,10 @@ export function CadCanvas() {
     downStateRef.current = null;
     panStateRef.current = null;
     sliceDragRef.current = null;
+    if (shapeDragRef.current !== null) {
+      shapeDragRef.current = null;
+      dispatch({ type: "setShapeDraft", draft: null });
+    }
     setCursorWorld(null);
     setSnap(null);
     setMarquee(null);
@@ -2336,6 +2505,24 @@ export function CadCanvas() {
       ) {
         return;
       }
+      // Undo / redo. Ctrl+Z = undo, Ctrl+Y or Ctrl+Shift+Z = redo.
+      // Use ctrlKey OR metaKey so Cmd+Z works on macOS.
+      const mod = e.ctrlKey || e.metaKey;
+      if (mod && !e.shiftKey && (e.key === "z" || e.key === "Z")) {
+        e.preventDefault();
+        dispatch({ type: "undo" });
+        return;
+      }
+      if (
+        mod &&
+        ((e.shiftKey && (e.key === "z" || e.key === "Z")) ||
+          e.key === "y" ||
+          e.key === "Y")
+      ) {
+        e.preventDefault();
+        dispatch({ type: "redo" });
+        return;
+      }
       if (e.key === "Delete" || e.key === "Backspace") {
         e.preventDefault();
         dispatch({ type: "deleteSelection" });
@@ -2472,6 +2659,8 @@ export function CadCanvas() {
         equationsVisible={equationsVisible}
         sliceMode={state.sliceMode}
         canSlice={interiorField !== null && canShowInteriorResults}
+        shapeMode={state.shapeMode}
+        canFillet={true}
         selectionSummary={selectionSummary}
         solveStats={solveStats}
         onCreateDomain={() => dispatch({ type: "createDomainFromSelection" })}
@@ -2483,6 +2672,7 @@ export function CadCanvas() {
         onToggleLabels={() => dispatch({ type: "toggleLabels" })}
         onToggleEquations={() => dispatch({ type: "toggleEquations" })}
         onToggleSlice={() => dispatch({ type: "toggleSlice" })}
+        onSetShapeMode={(mode) => dispatch({ type: "setShapeMode", mode })}
         onSave={handleSave}
         onLoad={handleLoad}
         onNew={handleNew}
@@ -3332,20 +3522,24 @@ export function CadCanvas() {
                       .map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`)
                       .join(" ");
 
-                    // Displaced node positions.
+                    // Displaced node positions — only when the mesh
+                    // overlay is on, otherwise the node markers clutter
+                    // the bare deformed shape.
                     const dashedDot = `${meshStroke * 1.5} ${meshStroke * 1.5}`;
-                    const nodeCircles = el.nodes.map((n, i) => (
-                      <circle
-                        key={`dn${i}`}
-                        cx={n.x + deformedScale * n.ux}
-                        cy={n.y + deformedScale * n.uy}
-                        r={meshNodeRadius}
-                        fill="none"
-                        stroke="var(--results)"
-                        strokeWidth={meshStroke}
-                        strokeDasharray={dashedDot}
-                      />
-                    ));
+                    const nodeCircles = meshVisible
+                      ? el.nodes.map((n, i) => (
+                          <circle
+                            key={`dn${i}`}
+                            cx={n.x + deformedScale * n.ux}
+                            cy={n.y + deformedScale * n.uy}
+                            r={meshNodeRadius}
+                            fill="none"
+                            stroke="var(--results)"
+                            strokeWidth={meshStroke}
+                            strokeDasharray={dashedDot}
+                          />
+                        ))
+                      : null;
 
                     return [
                       <g key={`${el.lineId}-${el.indexInLine}-def`}>
@@ -3378,6 +3572,112 @@ export function CadCanvas() {
                   pointerEvents="none"
                 />
               )}
+
+              {/* Plot-hover tracker — when the user hovers the
+                  Results-panel graph crosshair, mirror the matching
+                  world position with a small white circle so the
+                  hovered value's location is visible in the model. */}
+              {profileHoverWorld && (
+                <g pointerEvents="none">
+                  <circle
+                    cx={profileHoverWorld.x}
+                    cy={profileHoverWorld.y}
+                    r={lineStroke * 3.5}
+                    fill="white"
+                    stroke="black"
+                    strokeWidth={lineStroke * 0.6}
+                    opacity={0.95}
+                  />
+                </g>
+              )}
+
+              {/* Shape-builder live preview — only visible during the
+                  drag. Rectangle outline, circle outline, or fillet
+                  tangent arc. The committed shape lives in the model
+                  on mouseup, so this preview vanishes the moment the
+                  user releases. */}
+              {state.shapeDraft && state.shapeDraft.kind === "rect" && (() => {
+                const { c1, c2 } = state.shapeDraft;
+                const minX = Math.min(c1.x, c2.x);
+                const minY = Math.min(c1.y, c2.y);
+                const w = Math.abs(c2.x - c1.x);
+                const h = Math.abs(c2.y - c1.y);
+                return (
+                  <rect
+                    x={minX}
+                    y={minY}
+                    width={w}
+                    height={h}
+                    fill="var(--accent)"
+                    fillOpacity={0.08}
+                    stroke="var(--accent)"
+                    strokeWidth={lineStroke}
+                    strokeDasharray={`${lineStroke * 4} ${lineStroke * 3}`}
+                    pointerEvents="none"
+                  />
+                );
+              })()}
+              {state.shapeDraft && state.shapeDraft.kind === "circle" && (() => {
+                const { centre, edge } = state.shapeDraft;
+                const r = Math.hypot(edge.x - centre.x, edge.y - centre.y);
+                return (
+                  <g pointerEvents="none">
+                    <circle
+                      cx={centre.x}
+                      cy={centre.y}
+                      r={r}
+                      fill="var(--accent)"
+                      fillOpacity={0.08}
+                      stroke="var(--accent)"
+                      strokeWidth={lineStroke}
+                      strokeDasharray={`${lineStroke * 4} ${lineStroke * 3}`}
+                    />
+                    <circle
+                      cx={centre.x}
+                      cy={centre.y}
+                      r={lineStroke * 2}
+                      fill="var(--accent)"
+                    />
+                    <line
+                      x1={centre.x}
+                      y1={centre.y}
+                      x2={edge.x}
+                      y2={edge.y}
+                      stroke="var(--accent)"
+                      strokeWidth={lineStroke * 0.8}
+                      opacity={0.6}
+                      strokeDasharray={`${lineStroke * 2} ${lineStroke * 2}`}
+                    />
+                  </g>
+                );
+              })()}
+              {state.shapeDraft && state.shapeDraft.kind === "fillet" && (() => {
+                const draft = state.shapeDraft;
+                const corner = state.model.points.find(
+                  (p) => p.id === draft.cornerId,
+                );
+                if (!corner) return null;
+                return (
+                  <g pointerEvents="none">
+                    <circle
+                      cx={corner.x}
+                      cy={corner.y}
+                      r={draft.radius}
+                      fill="none"
+                      stroke="var(--accent)"
+                      strokeWidth={lineStroke}
+                      strokeDasharray={`${lineStroke * 4} ${lineStroke * 3}`}
+                      opacity={0.6}
+                    />
+                    <circle
+                      cx={corner.x}
+                      cy={corner.y}
+                      r={lineStroke * 2.5}
+                      fill="var(--accent)"
+                    />
+                  </g>
+                );
+              })()}
 
               {/* Slice line — committed slice + endpoint dots. Rendered
                   whenever a slice exists, regardless of whether slice
@@ -3599,6 +3899,7 @@ export function CadCanvas() {
           // was plotted from the selected lines.
           edgeProfile={sliceProfile ?? edgeProfile}
           isSlice={sliceProfile !== null}
+          onHoverWorld={setProfileHoverWorld}
           onSelectField={(field) =>
             dispatch({ type: "setInteriorField", field })
           }

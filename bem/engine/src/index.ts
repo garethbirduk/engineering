@@ -19,12 +19,12 @@ export function resolveMaterial(model: CadModel): MaterialProperties {
   return model.material ?? DEFAULT_MATERIAL;
 }
 
-/** SI value of a DirectionBc, applying its prefix (M=6, k=3, …).
+/** SI value of a DirectionBc, applying its prefix (G=9, M=6, k=3, …).
  *  Mirrors the converter in elements/discretise.ts but exposed here so
  *  callers that only need the magnitude (e.g. the stress-concentration
  *  reference stress) don't have to rebuild the mesh. */
 function bcSiValue(bc: DirectionBc): number {
-  const defaultPrefix = bc.kind === "traction" ? 6 : -3;
+  const defaultPrefix = bc.kind === "traction" ? 9 : -3;
   return bc.value * Math.pow(10, bc.prefix ?? defaultPrefix);
 }
 
